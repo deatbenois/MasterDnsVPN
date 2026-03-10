@@ -140,12 +140,6 @@ class MasterDnsVPNClient:
         self.config_version = self.config.get("CONFIG_VERSION", 0.1)
         self.min_config_version = 1.0
 
-        if self.config_version < self.min_config_version:
-            self.logger.warning(
-                f"Your config version ({self.config_version}) is outdated. "
-                f"Please update your config file to the latest version ({self.min_config_version}) for best performance and new features."
-            )
-
     # ---------------------------------------------------------
     # Connection Management
     # ---------------------------------------------------------
@@ -753,6 +747,11 @@ class MasterDnsVPNClient:
                 "<cyan>🔹 [Encoding Mode]:</cyan> <cyan>BASE_ENCODE_DATA</cyan> is <red>disabled</red>. "
                 "<fg #acff1c>Pros:</fg #acff1c> Larger Download MTU, higher performance. "
                 "<fg #ff6b6b>Cons:</fg #ff6b6b> Some resolvers may reject raw binary data."
+            )
+
+        if self.config_version < self.min_config_version:
+            self.logger.warning(
+                f"<yellow>🔸 [Config Version]:</yellow> Your config version ({self.config_version}) is outdated. Please update to the latest version ({self.min_config_version}) for best performance and new features."
             )
 
         if has_warnings:
