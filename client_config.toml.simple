@@ -19,6 +19,7 @@
 PROTOCOL_TYPE = "SOCKS5"
 
 # The domain name registered and pointing to your MasterDnsVPN server's NS records.
+# Don't use multiple domains here! However, if you do, make sure all domains point to the same server. You cannot use different domains with NS/A records pointing to different servers.
 DOMAINS = ["v.domain.com"]
 
 # Encryption Method: 0=None, 1=XOR, 2=ChaCha20, 3=AES-128-GCM, 4=AES-192-GCM, 5=AES-256-GCM
@@ -59,21 +60,21 @@ RESOLVER_DNS_SERVERS = [
 
 # Maximum number of packets to duplicate and send for each DNS query to improve reliability on unstable networks.
 # Increase this value to improve reliability on highly unstable networks, but be aware it will increase bandwidth usage.
-# For example, setting PACKET_DUPLICATION_COUNT = 3 means each packet will be sent 3 times in a row to 3 different DNS resolvers, and the server will accept the first valid response it receives, ignoring duplicates.
-PACKET_DUPLICATION_COUNT = 3
+# For example, setting PACKET_DUPLICATION_COUNT = 2 means each packet will be sent 2 times in a row to 2 different DNS resolvers, and the server will accept the first valid response it receives, ignoring duplicates.
+PACKET_DUPLICATION_COUNT = 2
 
 # Maximum number of packets to batch together in a single DNS response.
 # Larger batches can improve efficiency but may increase latency and packet loss on unstable networks. Default value for client is 1.
 # Increase this value to allow more packets to be sent together, up to the maximum allowed by the MTU settings.
 # 1: Disables batching.
-MAX_PACKETS_PER_BATCH = 1
+MAX_PACKETS_PER_BATCH = 3
 
 # Strategy to balance load across multiple DNS resolvers.
 # Options:
 #   1 - Random: Randomly select a resolver for each query.
 #   2 - Round Robin: Cycle through resolvers in order.
 #   3 - Least Loss: Prefer resolvers with the lowest observed packet-loss rate.
-RESOLVER_BALANCING_STRATEGY = 1
+RESOLVER_BALANCING_STRATEGY = 2
 
 # ------------------------------------------------------------------------------
 # 4. MTU TESTING SETTINGS (Accuracy vs Speed)
@@ -81,14 +82,14 @@ RESOLVER_BALANCING_STRATEGY = 1
 # Minimum MTU thresholds for resolver selection.
 # If a resolver's upload or download MTU is below these values, it will be excluded.
 # Set to 0 to disable minimum MTU checks.
-MIN_UPLOAD_MTU = 40
+MIN_UPLOAD_MTU = 100
 MIN_DOWNLOAD_MTU = 100
 
 # Maximum size of data packets sent to the server.
 # This should be set to the largest MTU that your network can reliably handle without fragmentation.
 # Start with a conservative value (e.g., 220) and increase it if you have a stable connection and want better performance.
 MAX_UPLOAD_MTU = 220
-MAX_DOWNLOAD_MTU = 4000
+MAX_DOWNLOAD_MTU = 200
 
 # Number of times the client will retry an MTU test if it fails.
 # - Default is 2. 
@@ -112,12 +113,12 @@ MTU_TEST_TIMEOUT = 1.0
 MAX_CONNECTION_ATTEMPTS = 10
 
 # ARQ window size (number of unacknowledged packets allowed in flight).
-# Suggested: 3000. Lower it to 300 if the client has very low RAM.
+# Suggested: 3000. Lower it to 500 if the client has very low RAM.
 ARQ_WINDOW_SIZE = 3000
 
 # Retransmission TimeOut settings (Seconds)
-ARQ_INITIAL_RTO = 1.0
-ARQ_MAX_RTO = 3.0
+ARQ_INITIAL_RTO = 0.2
+ARQ_MAX_RTO = 1.5
 
 # Time (seconds) to wait for a DNS query response before considering it lost and retransmitting.
 DNS_QUERY_TIMEOUT = 5.0
