@@ -118,14 +118,14 @@ MTU_SERVERS_FILE_FORMAT = "{IP} - UP: {UP_MTU} DOWN: {DOWN-MTU}"
 MAX_CONNECTION_ATTEMPTS = 10
 
 # Data-plane ARQ settings.
-ARQ_WINDOW_SIZE = 500
+ARQ_WINDOW_SIZE = 1000
 ARQ_INITIAL_RTO = 0.2
 ARQ_MAX_RTO = 1.0
 
 # Control-plane ARQ settings (SYN/FIN/RST/SOCKS control packets).
-ARQ_CONTROL_INITIAL_RTO = 0.2
+ARQ_CONTROL_INITIAL_RTO = 0.4
 ARQ_CONTROL_MAX_RTO = 1.0
-ARQ_CONTROL_MAX_RETRIES = 300
+ARQ_CONTROL_MAX_RETRIES = 180
 
 # ------------------------------------------------------------------------------
 # 6) Runtime Performance & Memory Caps

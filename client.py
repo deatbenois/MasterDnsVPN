@@ -142,7 +142,7 @@ class MasterDnsVPNClient(PacketQueueMixin):
         # ---------------------------------------------------------
         # ARQ and flow-control configuration
         # ---------------------------------------------------------
-        self.arq_window_size = self.config.get("ARQ_WINDOW_SIZE", 500)
+        self.arq_window_size = self.config.get("ARQ_WINDOW_SIZE", 1000)
         self.arq_initial_rto = self.config.get("ARQ_INITIAL_RTO", 0.2)
         self.arq_max_rto = self.config.get("ARQ_MAX_RTO", 1.5)
         self.rx_semaphore_limit = int(self.config.get("RX_SEMAPHORE_LIMIT", 1000))

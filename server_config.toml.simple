@@ -59,14 +59,14 @@ DATA_ENCRYPTION_METHOD = 1
 # ------------------------------------------------------------------------------
 
 # Data-plane ARQ profile.
-ARQ_WINDOW_SIZE = 500
-ARQ_INITIAL_RTO = 0.8
-ARQ_MAX_RTO = 2.0
+ARQ_WINDOW_SIZE = 1000
+ARQ_INITIAL_RTO = 0.5
+ARQ_MAX_RTO = 1.2
 
 # Control-plane ARQ profile.
-ARQ_CONTROL_INITIAL_RTO = 0.8
-ARQ_CONTROL_MAX_RTO = 2.0
-ARQ_CONTROL_MAX_RETRIES = 300
+ARQ_CONTROL_INITIAL_RTO = 0.4
+ARQ_CONTROL_MAX_RTO = 1.2
+ARQ_CONTROL_MAX_RETRIES = 180
 
 # ------------------------------------------------------------------------------
 # 5) Session Lifecycle

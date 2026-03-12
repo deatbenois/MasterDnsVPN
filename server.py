@@ -809,9 +809,6 @@ class MasterDnsVPNServer(PacketQueueMixin):
         stream_data["last_activity"] = now_mono
 
         if stream_data["status"] == "CONNECTED":
-            await self._enqueue_packet(
-                session_id, 1, stream_id, sn, Packet_Type.STREAM_DATA_ACK, b""
-            )
             now_ack = time.monotonic()
             last_syn_ack = stream_data.get("last_socks_syn_ack", 0.0)
             if now_ack - last_syn_ack >= 0.5:
@@ -822,9 +819,6 @@ class MasterDnsVPNServer(PacketQueueMixin):
             return
 
         if stream_data["status"] == "SOCKS_CONNECTING":
-            await self._enqueue_packet(
-                session_id, 1, stream_id, sn, Packet_Type.STREAM_DATA_ACK, b""
-            )
             return
 
         if stream_data["status"] not in ("SOCKS_HANDSHAKE", "PENDING"):
@@ -850,10 +844,6 @@ class MasterDnsVPNServer(PacketQueueMixin):
         extracted_data = self._extract_packet_payload(labels, extracted_header)
         if extracted_data and 0 <= frag_id < expected_chunk_count:
             stream_data["socks_chunks"][frag_id] = extracted_data
-
-        await self._enqueue_packet(
-            session_id, 1, stream_id, sn, Packet_Type.STREAM_DATA_ACK, b""
-        )
 
         chunks = stream_data["socks_chunks"]
         if 0 not in chunks:
@@ -1200,7 +1190,7 @@ class MasterDnsVPNServer(PacketQueueMixin):
         stream_id = extracted_header.get("stream_id", 0) if extracted_header else 0
         sn = extracted_header.get("sequence_num", 0) if extracted_header else 0
 
-        _ = await self._handle_closed_stream_packet(
+        handled_closed_stream = await self._handle_closed_stream_packet(
             session_id, stream_id, packet_type, sn
         )
 
@@ -1209,15 +1199,18 @@ class MasterDnsVPNServer(PacketQueueMixin):
             session["streams"] = {}
             streams = session["streams"]
 
-        await self._dispatch_stream_packet_nonblocking(
-            packet_type=packet_type,
-            session_id=session_id,
-            stream_id=stream_id,
-            sn=sn,
-            labels=labels,
-            extracted_header=extracted_header,
-            now_mono=now_mono,
-        )
+        # If this packet belongs to a closed stream, we already generated the
+        # proper ACK/RST response and must avoid re-dispatching it.
+        if not handled_closed_stream:
+            await self._dispatch_stream_packet_nonblocking(
+                packet_type=packet_type,
+                session_id=session_id,
+                stream_id=stream_id,
+                sn=sn,
+                labels=labels,
+                extracted_header=extracted_header,
+                now_mono=now_mono,
+            )
         res_data = None
         res_stream_id = 0
         res_sn = 0
