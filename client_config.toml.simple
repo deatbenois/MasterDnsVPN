@@ -48,8 +48,8 @@ SOCKS_HANDSHAKE_TIMEOUT = 240.0
 # 3) Resolver Selection & DNS Strategy
 # ------------------------------------------------------------------------------
 
-# Resolver pool queried by client.
-RESOLVER_DNS_SERVERS = ["8.8.8.8", "8.8.4.4", "1.1.1.1"]
+# Resolver pool moved to client_resolvers.txt (one IP per line).
+# This file must exist next to client executable/config file.
 
 # Send each DNS query N times for reliability in lossy networks.
 # 1 = no duplication.
@@ -74,10 +74,12 @@ DNS_QUERY_TIMEOUT = 5.0
 # Compression for client -> server payloads (upload direction).
 # 0=OFF, 1=ZSTD, 2=LZ4, 3=ZLIB
 # Payloads <=100 bytes are never compressed to reduce CPU usage.
+# Note: If your CPU usage is high, try setting this to 0 (OFF) or 1 (ZSTD). If you have very powerful CPU and want max compression, try 3 (ZLIB).
 UPLOAD_COMPRESSION_TYPE = 3
 
 # Compression for server -> client payloads (download direction).
 # Use same enum values as UPLOAD_COMPRESSION_TYPE.
+# Note: If your CPU usage is high, try setting this to 0 (OFF) or 1 (ZSTD). If you have very powerful CPU and want max compression, try 3 (ZLIB).
 DOWNLOAD_COMPRESSION_TYPE = 3
 
 # ------------------------------------------------------------------------------
@@ -85,10 +87,13 @@ DOWNLOAD_COMPRESSION_TYPE = 3
 # ------------------------------------------------------------------------------
 
 # Minimum accepted MTU values during resolver validation (0 disables each bound).
+# Please set these according to your network conditions.
+# Note: The software will suggest the best MTUs for you based on your domain.
 MIN_UPLOAD_MTU = 100
 MIN_DOWNLOAD_MTU = 100
 
 # Initial upper bounds for MTU probing.
+# Note: The software will suggest the best MTUs for you based on your domain.
 MAX_UPLOAD_MTU = 220
 MAX_DOWNLOAD_MTU = 200
 
@@ -170,6 +175,7 @@ RECHECK_BATCH_SIZE = 5
 MAX_CONNECTION_ATTEMPTS = 10
 
 # Data-plane ARQ settings.
+# Rediuce ARQ_WINDOW_SIZE if your RAM is limited or if you have very high MTUs and want to reduce memory usage.
 ARQ_WINDOW_SIZE = 1000
 ARQ_INITIAL_RTO = 0.2
 ARQ_MAX_RTO = 1.0

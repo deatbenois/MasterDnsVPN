@@ -8,6 +8,7 @@ import concurrent.futures
 import ctypes
 import functools
 import heapq
+import ipaddress
 import os
 import random
 import signal
@@ -102,7 +103,7 @@ class MasterDnsVPNClient(PacketQueueMixin):
         # ---------------------------------------------------------
         # DNS transport and listener configuration
         # ---------------------------------------------------------
-        self.resolvers: list = self.config.get("RESOLVER_DNS_SERVERS", [])
+        self.resolvers: list = self._load_resolvers_from_file()
         self.allowed_resolver_sources = {
             str(r).strip().lower() for r in self.resolvers if str(r).strip()
         }
@@ -332,6 +333,50 @@ class MasterDnsVPNClient(PacketQueueMixin):
         self.scale_profile_name = "manual"
 
         self.logger.debug("<magenta>[INIT]</magenta> MasterDnsVPNClient initialized.")
+
+    def _load_resolvers_from_file(self) -> list:
+        """Load resolver IP addresses from client_resolvers.txt."""
+        resolver_file = get_config_path("client_resolvers.txt")
+        if not os.path.isfile(resolver_file):
+            self.logger.error(
+                "Resolver file '<cyan>client_resolvers.txt</cyan>' not found."
+            )
+            self.logger.error("Please place it next to the executable and restart.")
+            input("Press Enter to exit...")
+            sys.exit(1)
+
+        resolvers = []
+        seen = set()
+        try:
+            with open(resolver_file, "r", encoding="utf-8") as f:
+                for raw_line in f:
+                    line = raw_line.strip()
+                    if not line or line.startswith("#"):
+                        continue
+                    try:
+                        normalized_ip = str(ipaddress.ip_address(line))
+                    except ValueError:
+                        continue
+                    if normalized_ip in seen:
+                        continue
+                    seen.add(normalized_ip)
+                    resolvers.append(normalized_ip)
+        except Exception as exc:
+            self.logger.error(
+                f"Failed to read resolver file '<cyan>client_resolvers.txt</cyan>': {exc}"
+            )
+            input("Press Enter to exit...")
+            sys.exit(1)
+
+        if not resolvers:
+            self.logger.error(
+                "No valid resolver IP found in '<cyan>client_resolvers.txt</cyan>'."
+            )
+            self.logger.error("Add at least one valid IPv4/IPv6 per line and restart.")
+            input("Press Enter to exit...")
+            sys.exit(1)
+
+        return resolvers
 
     def _apply_scale_profile(self, total_pairs: int) -> None:
         """Apply runtime tuning profile based on resolver-domain pair count."""
