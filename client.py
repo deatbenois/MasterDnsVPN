@@ -3427,9 +3427,12 @@ class MasterDnsVPNClient(PacketQueueMixin):
 
         if ptype == Packet_Type.STREAM_RST_ACK and stream_id_exists:
             arq = stream_data.get("stream")
-            if arq:
+            if arq and getattr(arq, "_rst_seq_sent", None) == sn:
                 await arq.receive_control_ack(Packet_Type.STREAM_RST_ACK, sn)
-            stream_data["rst_retries"] = 99
+                stream_data["rst_retries"] = 99
+            elif stream_data.get("rst_seq_sent") == sn:
+                stream_data["rst_acked"] = True
+                stream_data["rst_retries"] = 99
             self._send_ping_packet()
             return
 

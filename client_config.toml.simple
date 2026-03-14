@@ -177,12 +177,12 @@ MAX_CONNECTION_ATTEMPTS = 10
 # Data-plane ARQ settings.
 # Rediuce ARQ_WINDOW_SIZE if your RAM is limited or if you have very high MTUs and want to reduce memory usage.
 ARQ_WINDOW_SIZE = 256
-ARQ_INITIAL_RTO = 0.2
-ARQ_MAX_RTO = 1.0
+ARQ_INITIAL_RTO = 0.4
+ARQ_MAX_RTO = 1.5
 
 # Control-plane ARQ settings (SYN/FIN/RST/SOCKS control packets).
 ARQ_CONTROL_INITIAL_RTO = 0.4
-ARQ_CONTROL_MAX_RTO = 1.0
+ARQ_CONTROL_MAX_RTO = 1.5
 ARQ_CONTROL_MAX_RETRIES = 180
 
 # ------------------------------------------------------------------------------
