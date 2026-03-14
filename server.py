@@ -927,6 +927,7 @@ class MasterDnsVPNServer(PacketQueueMixin):
                 "track_syn_ack": set(),
                 "track_data": set(),
                 "track_resend": set(),
+                "track_types": set(),
                 "socks_chunks": {},
             }
             streams[stream_id] = stream_data
@@ -2126,8 +2127,11 @@ class MasterDnsVPNServer(PacketQueueMixin):
                     ptype in self._packable_control_types
                     and ptype != Packet_Type.SOCKS5_SYN
                 ):
-                    heapq.heappush(main_q, item)
-                    self._inc_priority_counter(session, item[0])
+                    if self._track_main_packet_once(
+                        session, int(item[3]), ptype, int(item[4])
+                    ):
+                        heapq.heappush(main_q, item)
+                        self._inc_priority_counter(session, item[0])
                     self._dec_priority_counter(stream_data, item[0])
 
         try:
@@ -2137,6 +2141,7 @@ class MasterDnsVPNServer(PacketQueueMixin):
             stream_data["track_syn_ack"].clear()
             stream_data["track_resend"].clear()
             stream_data["track_data"].clear()
+            stream_data.get("track_types", set()).clear()
             stream_data["priority_counts"].clear()
             stream_data["status"] = "TIME_WAIT"
             stream_data["close_time"] = time.monotonic()
@@ -2176,32 +2181,43 @@ class MasterDnsVPNServer(PacketQueueMixin):
         self, session_id, priority, stream_id, sn, packet_type, data
     ):
         """Enqueue one outgoing VPN packet into session/stream queues."""
+        # All outbound packets pass through this function so dedupe and queue
+        # bookkeeping stay consistent no matter which subsystem produced them.
         session = self.sessions.get(session_id)
         if not session:
             return
 
         ptype = int(packet_type)
+        # Normalize caller priority once so control packets get their forced priority.
         eff_priority = self._effective_priority_for_packet(ptype, priority)
 
+        # enqueue_seq provides deterministic heap ordering between same-priority items.
         session["enqueue_seq"] = (session.get("enqueue_seq", 0) + 1) & 0x7FFFFFFF
         queue_item = (eff_priority, session["enqueue_seq"], ptype, stream_id, sn, data)
 
         if stream_id == 0:
-            if not self._track_main_packet_once(session, ptype, sn):
+            # stream_id 0 is the session/main queue. Dedupe here must be session-aware.
+            if not self._track_main_packet_once(session, stream_id, ptype, sn):
                 return
             self._push_queue_item(session["main_queue"], session, queue_item)
             return
 
         stream_data = session.get("streams", {}).get(stream_id)
         if not stream_data:
+            # Once a stream disappears, only terminal cleanup packets are allowed to
+            # fall back to main_queue so the peer can still converge its state.
             if ptype in (
                 Packet_Type.STREAM_RST,
                 Packet_Type.STREAM_RST_ACK,
                 Packet_Type.STREAM_FIN_ACK,
             ):
+                if not self._track_main_packet_once(session, stream_id, ptype, sn):
+                    return
                 self._push_queue_item(session["main_queue"], session, queue_item)
             return
 
+        # Normal per-stream traffic uses stream-local dedupe so duplicate control/data
+        # packets do not accumulate while the original copy is still queued.
         if not self._track_stream_packet_once(
             stream_data, ptype, sn, data_packet_types=(Packet_Type.STREAM_DATA,)
         ):
@@ -2250,6 +2266,7 @@ class MasterDnsVPNServer(PacketQueueMixin):
             "track_syn_ack": set(),
             "track_data": set(),
             "track_resend": set(),
+            "track_types": set(),
             "socks_chunks": {},
             "last_socks_syn_ack": 0.0,
         }
