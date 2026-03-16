@@ -179,12 +179,12 @@ MAX_CONNECTION_ATTEMPTS = 10
 
 # Data-plane ARQ settings.
 # Rediuce ARQ_WINDOW_SIZE if your RAM is limited or if you have very high MTUs and want to reduce memory usage.
-ARQ_WINDOW_SIZE = 500
-ARQ_INITIAL_RTO = 0.6
+ARQ_WINDOW_SIZE = 1000
+ARQ_INITIAL_RTO = 0.5
 ARQ_MAX_RTO = 3.0
 
 # Control-plane ARQ settings (SYN/FIN/RST/SOCKS control packets).
-ARQ_CONTROL_INITIAL_RTO = 0.6
+ARQ_CONTROL_INITIAL_RTO = 0.5
 ARQ_CONTROL_MAX_RTO = 3.0
 ARQ_CONTROL_MAX_RETRIES = 80
 
@@ -199,7 +199,7 @@ NUM_DNS_WORKERS = 2
 # CPU thread-pool size for parser/codec offload.
 # 0 = auto (recommended). Set a positive number to force size. Set -1 to disable.
 # For a 2-core system, 2 is a safer default than an aggressive auto profile.
-CPU_WORKER_THREADS = 0
+CPU_WORKER_THREADS = -1
 
 # Max in-flight RX packet processing tasks.
 RX_SEMAPHORE_LIMIT = 256

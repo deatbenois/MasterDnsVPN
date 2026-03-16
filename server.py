@@ -199,6 +199,13 @@ class MasterDnsVPNServer(PacketQueueMixin):
         self._max_sessions = max(1, min(255, int(self.config.get("MAX_SESSIONS", 255))))
         self.free_session_ids = deque(range(1, self._max_sessions + 1))
         self.recently_closed_sessions = {}
+        self.invalid_cookie_window_seconds = max(
+            1.0, float(self.config.get("INVALID_COOKIE_WINDOW_SECONDS", 2.0))
+        )
+        self.invalid_cookie_error_threshold = max(
+            1, int(self.config.get("INVALID_COOKIE_ERROR_THRESHOLD", 10))
+        )
+        self.invalid_cookie_tracker = {}
 
         self._dns_task = None
         self._dns_request_queue = None
@@ -536,6 +543,7 @@ class MasterDnsVPNServer(PacketQueueMixin):
             pass
 
         self.sessions.pop(session_id, None)
+        self.invalid_cookie_tracker.pop(session_id, None)
 
         try:
             if 1 <= session_id <= getattr(self, "_max_sessions", 255):
@@ -570,6 +578,25 @@ class MasterDnsVPNServer(PacketQueueMixin):
             return int(closed_info.get("session_cookie", 0) or 0)
 
         return None
+
+    def _should_emit_invalid_cookie_error(
+        self, packet_type: int, session_id: int, now: float | None = None
+    ) -> bool:
+        if int(packet_type) in self._pre_session_packet_types:
+            return False
+
+        now = time.monotonic() if now is None else now
+        cutoff = now - self.invalid_cookie_window_seconds
+        attempts = self.invalid_cookie_tracker.get(session_id)
+        if attempts is None:
+            attempts = deque()
+            self.invalid_cookie_tracker[session_id] = attempts
+
+        while attempts and attempts[0] < cutoff:
+            attempts.popleft()
+
+        attempts.append(now)
+        return len(attempts) >= self.invalid_cookie_error_threshold
 
     def _activate_response_queue(self, session: dict, stream_id: int) -> None:
         sid = int(stream_id)
@@ -783,6 +810,15 @@ class MasterDnsVPNServer(PacketQueueMixin):
                 ]
                 for sid in expired_closed:
                     self.recently_closed_sessions.pop(sid, None)
+
+                expired_invalid_cookie = [
+                    sid
+                    for sid, attempts in self.invalid_cookie_tracker.items()
+                    if not attempts
+                    or attempts[-1] < (now - self.invalid_cookie_window_seconds)
+                ]
+                for sid in expired_invalid_cookie:
+                    self.invalid_cookie_tracker.pop(sid, None)
             except asyncio.CancelledError:
                 break
             except Exception as e:
@@ -2307,6 +2343,24 @@ class MasterDnsVPNServer(PacketQueueMixin):
                 self.logger.debug(
                     f"Invalid session cookie for packet type '{packet_type}' session '{session_id}' from {addr}. Dropping."
                 )
+                if self._should_emit_invalid_cookie_error(packet_type, session_id):
+                    response_info = self.recently_closed_sessions.get(session_id)
+                    current_session = self.sessions.get(session_id)
+                    if current_session is not None:
+                        response_info = {
+                            "base_encode": bool(
+                                current_session.get("base_encode_responses", False)
+                            )
+                        }
+
+                    vpn_response = self._build_invalid_session_error_response(
+                        session_id=session_id,
+                        request_domain=request_domain,
+                        question_packet=data,
+                        closed_info=response_info,
+                    )
+                    if vpn_response:
+                        await self.send_udp_response(vpn_response, addr)
                 return
 
             if packet_type in self._valid_packet_types:
@@ -2382,7 +2436,9 @@ class MasterDnsVPNServer(PacketQueueMixin):
         """Receive DNS datagrams and enqueue them for a fixed worker pool."""
         assert self.udp_sock is not None, "UDP socket is not initialized."
         assert self.loop is not None, "Event loop is not initialized."
-        assert self._dns_request_queue is not None, "DNS request queue is not initialized."
+        assert self._dns_request_queue is not None, (
+            "DNS request queue is not initialized."
+        )
         self.udp_sock.setblocking(False)
 
         loop = self.loop
