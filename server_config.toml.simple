@@ -106,7 +106,7 @@ MAX_SESSIONS = 255
 # ------------------------------------------------------------------------------
 
 # Max queued DNS requests waiting for request workers.
-MAX_CONCURRENT_REQUESTS = 256
+MAX_CONCURRENT_REQUESTS = 500
 
 # Fixed number of DNS request workers.
 # This avoids creating a new asyncio task for every incoming packet.

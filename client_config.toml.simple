@@ -218,7 +218,7 @@ NUM_DNS_WORKERS = 2
 CPU_WORKER_THREADS = 0
 
 # Max in-flight RX packet processing tasks.
-RX_SEMAPHORE_LIMIT = 256
+RX_SEMAPHORE_LIMIT = 500
 
 # Max closed-stream records retained for duplicate-close protection.
 MAX_CLOSED_STREAM_RECORDS = 2000
