@@ -259,7 +259,6 @@ class MasterDnsVPNClient(PacketQueueMixin):
         self.enqueue_seq = 0
         self.count_ping = 0
 
-        self.server_rtt_tracker = {}
         self.server_health = defaultdict(
             lambda: {
                 "pending": deque(),
@@ -596,7 +595,6 @@ class MasterDnsVPNClient(PacketQueueMixin):
 
     def _reset_server_runtime_state(self, server_key: str) -> None:
         self.server_health.pop(server_key, None)
-        self.server_rtt_tracker.pop(server_key, None)
         self.balancer.reset_server_stats(server_key)
 
     def _track_server_send(self, server_key: str) -> None:
@@ -604,13 +602,18 @@ class MasterDnsVPNClient(PacketQueueMixin):
         h = self.server_health[server_key]
         h["pending"].append(now)
 
-    def _track_server_success(self, server_key: str) -> None:
+    def _track_server_success(self, server_key: str) -> float | None:
         now = time.monotonic()
         h = self.server_health[server_key]
-        if h["pending"]:
-            h["pending"].popleft()
+        pending = h["pending"]
+        if not pending:
+            self._prune_server_health_window(server_key, now)
+            return None
+
+        sent_time = pending.popleft()
         h["events"].append((now, True))
         self._prune_server_health_window(server_key, now)
+        return sent_time
 
     def _prune_server_health_window(self, server_key: str, now: float) -> None:
         h = self.server_health.get(server_key)
@@ -878,14 +881,6 @@ class MasterDnsVPNClient(PacketQueueMixin):
                     and source_ip not in self.allowed_resolver_sources
                 ):
                     return None, b""
-
-                server_key = f"{source_ip}:{matched_domain}"
-                self._track_server_success(server_key)
-                sent_time = self.server_rtt_tracker.pop(server_key, 0.0)
-                if sent_time > 0.0:
-                    self.balancer.report_success(
-                        server_key, rtt=(time.monotonic() - sent_time)
-                    )
         except Exception:
             return None, b""
 
@@ -903,6 +898,15 @@ class MasterDnsVPNClient(PacketQueueMixin):
         )
         if packet_cookie != expected_cookie:
             return None, b""
+
+        if addr:
+            source_ip = str(addr[0]).strip().lower()
+            server_key = f"{source_ip}:{matched_domain}"
+            sent_time = self._track_server_success(server_key)
+            if sent_time is not None:
+                self.balancer.report_success(
+                    server_key, rtt=(time.monotonic() - sent_time)
+                )
 
         return parsed_header, returned_data
 
@@ -2294,7 +2298,6 @@ class MasterDnsVPNClient(PacketQueueMixin):
         self.track_seq_packets = set()
         self.track_fragment_packets = set()
         self.rx_tasks = set()
-        self.server_rtt_tracker.clear()
         self.server_health.clear()
 
         ping_mgr = getattr(self, "ping_manager", None)
@@ -2323,7 +2326,6 @@ class MasterDnsVPNClient(PacketQueueMixin):
             self.active_streams.clear()
             self.closed_streams.clear()
             self.rx_tasks.clear()
-            self.server_rtt_tracker.clear()
             self.server_health.clear()
         except Exception:
             pass
@@ -3229,7 +3231,6 @@ class MasterDnsVPNClient(PacketQueueMixin):
             )
 
             for conn in target_conns:
-                self.server_rtt_tracker[conn["_key"]] = time.monotonic()
                 self.balancer.report_send(conn["_key"])
                 self._track_server_send(conn["_key"])
                 query_packets = self.dns_parser.build_request_dns_query(

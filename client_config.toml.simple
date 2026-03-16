@@ -143,7 +143,7 @@ MTU_ADDED_SERVER_LOG_FORMAT = "Server {IP} re-added at {TIME} (UP MTU: {UP_MTU},
 # Auto-disable a resolver/domain pair during runtime if it has 100% timeouts
 # across the configured observation window (while at least one other active server exists).
 AUTO_DISABLE_TIMEOUT_SERVERS = true
-AUTO_DISABLE_TIMEOUT_WINDOW_SECONDS = 300
+AUTO_DISABLE_TIMEOUT_WINDOW_SECONDS = 120
 
 # Minimum resolved observations (timeout/success events) required before disable decision.
 # Higher value reduces false positives on low-traffic clients.
