@@ -55,14 +55,14 @@ func (s *Server) Run(ctx context.Context) error {
 	defer conn.Close()
 
 	if err := conn.SetReadBuffer(s.cfg.SocketBufferSize); err != nil {
-		s.log.Warnf("<yellow>set read buffer failed</yellow>: <cyan>%v</cyan>", err)
+		s.log.Warnf("⚠️ <yellow>Failed To Set UDP Read Buffer</yellow>: <cyan>%v</cyan>", err)
 	}
 	if err := conn.SetWriteBuffer(s.cfg.SocketBufferSize); err != nil {
-		s.log.Warnf("<yellow>set write buffer failed</yellow>: <cyan>%v</cyan>", err)
+		s.log.Warnf("⚠️ <yellow>Failed To Set UDP Write Buffer</yellow>: <cyan>%v</cyan>", err)
 	}
 
 	s.log.Infof(
-		"<green>udp listener ready</green> addr=<cyan>%s</cyan> readers=<magenta>%d</magenta> workers=<magenta>%d</magenta> queue=<magenta>%d</magenta>",
+		"📡 <green>UDP Listener Ready</green>  Addr: <cyan>%s</cyan>  |  Readers: <magenta>%d</magenta>  |  Workers: <magenta>%d</magenta>  |  Queue: <magenta>%d</magenta>",
 		s.cfg.Address(),
 		s.cfg.UDPReaders,
 		s.cfg.DNSRequestWorkers,
@@ -126,7 +126,7 @@ func (s *Server) readLoop(ctx context.Context, conn *net.UDPConn, reqCh chan<- r
 				return nil
 			}
 			s.log.Debugf(
-				"<magenta>reader</magenta> <cyan>%d</cyan> read error: <yellow>%v</yellow>",
+				"Reader <cyan>%d</cyan> returned a UDP read error: <yellow>%v</yellow>",
 				readerID,
 				err,
 			)
@@ -164,7 +164,7 @@ func (s *Server) worker(ctx context.Context, conn *net.UDPConn, reqCh <-chan req
 
 			if _, err := conn.WriteToUDP(response, req.addr); err != nil {
 				s.log.Debugf(
-					"<magenta>worker</magenta> <cyan>%d</cyan> write error to <cyan>%s</cyan>: <yellow>%v</yellow>",
+					"Worker <cyan>%d</cyan> failed to send a UDP response to <cyan>%s</cyan>: <yellow>%v</yellow>",
 					workerID,
 					req.addr.String(),
 					err,
@@ -199,7 +199,7 @@ func (s *Server) onDrop(addr *net.UDPAddr) {
 	}
 
 	s.log.Warnf(
-		"<yellow>request queue overloaded</yellow> total_dropped=<magenta>%d</magenta> last_remote=<cyan>%s</cyan>",
+		"⚠️ <yellow>Request Queue Overloaded</yellow>  |  Total Dropped: <magenta>%d</magenta>  |  Last Remote: <cyan>%s</cyan>",
 		total,
 		addr.String(),
 	)

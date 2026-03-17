@@ -18,6 +18,8 @@ import (
 )
 
 type ServerConfig struct {
+	ConfigDir             string  `toml:"-"`
+	ConfigPath            string  `toml:"-"`
 	UDPHost               string  `toml:"UDP_HOST"`
 	UDPPort               int     `toml:"UDP_PORT"`
 	UDPReaders            int     `toml:"UDP_READERS"`
@@ -26,6 +28,8 @@ type ServerConfig struct {
 	DNSRequestWorkers     int     `toml:"DNS_REQUEST_WORKERS"`
 	MaxPacketSize         int     `toml:"MAX_PACKET_SIZE"`
 	DropLogIntervalSecs   float64 `toml:"DROP_LOG_INTERVAL_SECONDS"`
+	DataEncryptionMethod  int     `toml:"DATA_ENCRYPTION_METHOD"`
+	EncryptionKeyFile     string  `toml:"ENCRYPTION_KEY_FILE"`
 	LogLevel              string  `toml:"LOG_LEVEL"`
 }
 
@@ -55,6 +59,8 @@ func defaultServerConfig() ServerConfig {
 		DNSRequestWorkers:     workers,
 		MaxPacketSize:         4096,
 		DropLogIntervalSecs:   2.0,
+		DataEncryptionMethod:  1,
+		EncryptionKeyFile:     "encrypt_key.txt",
 		LogLevel:              "INFO",
 	}
 }
@@ -73,6 +79,9 @@ func LoadServerConfig(filename string) (ServerConfig, error) {
 	if _, err := toml.DecodeFile(path, &cfg); err != nil {
 		return cfg, fmt.Errorf("parse TOML failed for %s: %w", path, err)
 	}
+
+	cfg.ConfigPath = path
+	cfg.ConfigDir = filepath.Dir(path)
 
 	if cfg.UDPHost == "" {
 		cfg.UDPHost = "0.0.0.0"
@@ -98,6 +107,12 @@ func LoadServerConfig(filename string) (ServerConfig, error) {
 	if cfg.DropLogIntervalSecs <= 0 {
 		cfg.DropLogIntervalSecs = 2.0
 	}
+	if cfg.DataEncryptionMethod < 0 || cfg.DataEncryptionMethod > 5 {
+		cfg.DataEncryptionMethod = 1
+	}
+	if cfg.EncryptionKeyFile == "" {
+		cfg.EncryptionKeyFile = "encrypt_key.txt"
+	}
 	if cfg.LogLevel == "" {
 		cfg.LogLevel = "INFO"
 	}
@@ -111,4 +126,14 @@ func (c ServerConfig) Address() string {
 
 func (c ServerConfig) DropLogInterval() time.Duration {
 	return time.Duration(c.DropLogIntervalSecs * float64(time.Second))
+}
+
+func (c ServerConfig) EncryptionKeyPath() string {
+	if c.EncryptionKeyFile == "" {
+		return filepath.Join(c.ConfigDir, "encrypt_key.txt")
+	}
+	if filepath.IsAbs(c.EncryptionKeyFile) {
+		return c.EncryptionKeyFile
+	}
+	return filepath.Join(c.ConfigDir, c.EncryptionKeyFile)
 }
