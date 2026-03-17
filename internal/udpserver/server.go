@@ -15,6 +15,7 @@ import (
 	"sync/atomic"
 
 	"masterdnsvpn-go/internal/config"
+	"masterdnsvpn-go/internal/dnsparser"
 	"masterdnsvpn-go/internal/logger"
 )
 
@@ -55,14 +56,14 @@ func (s *Server) Run(ctx context.Context) error {
 	defer conn.Close()
 
 	if err := conn.SetReadBuffer(s.cfg.SocketBufferSize); err != nil {
-		s.log.Warnf("⚠️ <yellow>Failed To Set UDP Read Buffer</yellow>: <cyan>%v</cyan>", err)
+		s.log.Warnf("[!] <yellow>Failed To Set UDP Read Buffer</yellow>: <cyan>%v</cyan>", err)
 	}
 	if err := conn.SetWriteBuffer(s.cfg.SocketBufferSize); err != nil {
-		s.log.Warnf("⚠️ <yellow>Failed To Set UDP Write Buffer</yellow>: <cyan>%v</cyan>", err)
+		s.log.Warnf("[!] <yellow>Failed To Set UDP Write Buffer</yellow>: <cyan>%v</cyan>", err)
 	}
 
 	s.log.Infof(
-		"📡 <green>UDP Listener Ready</green>  Addr: <cyan>%s</cyan>  |  Readers: <magenta>%d</magenta>  |  Workers: <magenta>%d</magenta>  |  Queue: <magenta>%d</magenta>",
+		"[*] <green>UDP Listener Ready</green>  Addr: <cyan>%s</cyan>  |  Readers: <magenta>%d</magenta>  |  Workers: <magenta>%d</magenta>  |  Queue: <magenta>%d</magenta>",
 		s.cfg.Address(),
 		s.cfg.UDPReaders,
 		s.cfg.DNSRequestWorkers,
@@ -179,6 +180,39 @@ func (s *Server) worker(ctx context.Context, conn *net.UDPConn, reqCh <-chan req
 }
 
 func (s *Server) handlePacket(packet []byte) []byte {
+	parsed, err := dnsparser.ParsePacketLite(packet)
+	if err != nil {
+		return nil
+	}
+
+	if parsed.HasQuestion {
+		q := parsed.FirstQuestion
+		s.log.Debugf(
+			"[DNS] <green>Parsed Packet</green> id=<cyan>%d</cyan> qr=<cyan>%d</cyan> opcode=<cyan>%d</cyan> qd=<cyan>%d</cyan> an=<cyan>%d</cyan> ns=<cyan>%d</cyan> ar=<cyan>%d</cyan> qname=<yellow>%s</yellow> qtype=<magenta>%d</magenta> qclass=<magenta>%d</magenta>",
+			parsed.Header.ID,
+			parsed.Header.QR,
+			parsed.Header.OpCode,
+			parsed.Header.QDCount,
+			parsed.Header.ANCount,
+			parsed.Header.NSCount,
+			parsed.Header.ARCount,
+			q.Name,
+			q.Type,
+			q.Class,
+		)
+	} else {
+		s.log.Debugf(
+			"[DNS] <green>Parsed Packet</green> id=<cyan>%d</cyan> qr=<cyan>%d</cyan> opcode=<cyan>%d</cyan> qd=<cyan>%d</cyan> an=<cyan>%d</cyan> ns=<cyan>%d</cyan> ar=<cyan>%d</cyan>",
+			parsed.Header.ID,
+			parsed.Header.QR,
+			parsed.Header.OpCode,
+			parsed.Header.QDCount,
+			parsed.Header.ANCount,
+			parsed.Header.NSCount,
+			parsed.Header.ARCount,
+		)
+	}
+
 	return packet
 }
 
@@ -199,7 +233,7 @@ func (s *Server) onDrop(addr *net.UDPAddr) {
 	}
 
 	s.log.Warnf(
-		"⚠️ <yellow>Request Queue Overloaded</yellow>  |  Total Dropped: <magenta>%d</magenta>  |  Last Remote: <cyan>%s</cyan>",
+		"[!] <yellow>Request Queue Overloaded</yellow>  |  Total Dropped: <magenta>%d</magenta>  |  Last Remote: <cyan>%s</cyan>",
 		total,
 		addr.String(),
 	)
