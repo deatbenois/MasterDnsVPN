@@ -1,0 +1,296 @@
+// ==============================================================================
+// MasterDnsVPN
+// Author: MasterkinG32
+// Github: https://github.com/masterking32
+// Year: 2026
+// ==============================================================================
+
+package vpnproto
+
+import (
+	"errors"
+
+	"masterdnsvpn-go/internal/enums"
+	"masterdnsvpn-go/internal/security"
+)
+
+var (
+	ErrPacketTooShort     = errors.New("vpn packet too short")
+	ErrInvalidPacketType  = errors.New("invalid vpn packet type")
+	ErrInvalidHeaderCheck = errors.New("invalid vpn header check")
+	ErrInvalidEncodedData = errors.New("invalid encoded vpn labels")
+	ErrCodecUnavailable   = errors.New("vpn codec unavailable")
+)
+
+const (
+	integrityLength = 2
+	minHeaderLength = 4
+
+	packetFlagValid = 1 << iota
+	packetFlagStream
+	packetFlagSequence
+	packetFlagFragment
+	packetFlagCompression
+)
+
+var packetFlags = buildPacketFlags()
+
+// Header layout copied from the Python parser, with one change:
+// `total_data_length` has been removed from the fragment extension.
+//
+// Base header:
+//   [0] Session ID     (1 byte)
+//   [1] Packet Type    (1 byte)
+//
+// Optional extensions by packet type:
+//   Stream extension:
+//     [2..3] Stream ID         (2 bytes)
+//   Sequence extension:
+//     [+2]   Sequence Number   (2 bytes)
+//   Fragment extension:
+//     [+1]   Fragment ID       (1 byte)
+//     [+1]   Total Fragments   (1 byte)
+//   Compression extension:
+//     [+1]   Compression Type  (1 byte)
+//
+// Integrity footer:
+//   [+1] Session Cookie  (1 byte)
+//   [+1] Header Check    (1 byte)
+//
+// Payload starts immediately after the header check byte.
+
+type Packet struct {
+	SessionID     uint8
+	PacketType    uint8
+	SessionCookie uint8
+
+	HasStreamID bool
+	StreamID    uint16
+
+	HasSequenceNum bool
+	SequenceNum    uint16
+
+	HasFragmentInfo bool
+	FragmentID      uint8
+	TotalFragments  uint8
+
+	HasCompressionType bool
+	CompressionType    uint8
+
+	HeaderLength int
+	Payload      []byte
+}
+
+func ParseFromLabels(labels string, codec *security.Codec) (Packet, error) {
+	if codec == nil {
+		return Packet{}, ErrCodecUnavailable
+	}
+	if labels == "" {
+		return Packet{}, ErrInvalidEncodedData
+	}
+
+	raw, err := codec.DecodeLowerBase36StringAndDecrypt(labels)
+	if err != nil {
+		return Packet{}, err
+	}
+
+	return Parse(raw)
+}
+
+func Parse(data []byte) (Packet, error) {
+	if len(data) < minHeaderLength {
+		return Packet{}, ErrPacketTooShort
+	}
+
+	packetType := data[1]
+	flags := packetFlags[packetType]
+	if flags&packetFlagValid == 0 {
+		return Packet{}, ErrInvalidPacketType
+	}
+
+	packet := Packet{
+		SessionID:  data[0],
+		PacketType: packetType,
+	}
+
+	offset := 2
+	if flags&packetFlagStream != 0 {
+		if len(data) < offset+2 {
+			return Packet{}, ErrPacketTooShort
+		}
+		packet.HasStreamID = true
+		packet.StreamID = (uint16(data[offset]) << 8) | uint16(data[offset+1])
+		offset += 2
+	}
+
+	if flags&packetFlagSequence != 0 {
+		if len(data) < offset+2 {
+			return Packet{}, ErrPacketTooShort
+		}
+		packet.HasSequenceNum = true
+		packet.SequenceNum = (uint16(data[offset]) << 8) | uint16(data[offset+1])
+		offset += 2
+	}
+
+	if flags&packetFlagFragment != 0 {
+		if len(data) < offset+2 {
+			return Packet{}, ErrPacketTooShort
+		}
+		packet.HasFragmentInfo = true
+		packet.FragmentID = data[offset]
+		packet.TotalFragments = data[offset+1]
+		offset += 2
+	}
+
+	if flags&packetFlagCompression != 0 {
+		if len(data) < offset+1 {
+			return Packet{}, ErrPacketTooShort
+		}
+		packet.HasCompressionType = true
+		packet.CompressionType = data[offset]
+		offset++
+	}
+
+	if len(data) < offset+integrityLength {
+		return Packet{}, ErrPacketTooShort
+	}
+
+	packet.SessionCookie = data[offset]
+	checkByte := data[offset+1]
+	expected := computeHeaderCheckByte(data[:offset+1])
+	if checkByte != expected {
+		return Packet{}, ErrInvalidHeaderCheck
+	}
+
+	packet.HeaderLength = offset + integrityLength
+	packet.Payload = data[packet.HeaderLength:]
+	return packet, nil
+}
+
+func computeHeaderCheckByte(header []byte) byte {
+	acc := byte((len(header)*17 + 0x5D) & 0xFF)
+	for idx, value := range header {
+		acc = byte((int(acc) + int(value) + idx) & 0xFF)
+		acc ^= byte((int(value) << (idx & 0x03)) & 0xFF)
+	}
+	return acc
+}
+
+func isValidPacketType(packetType uint8) bool {
+	return packetFlags[packetType]&packetFlagValid != 0
+}
+
+func hasStreamExtension(packetType uint8) bool {
+	return packetFlags[packetType]&packetFlagStream != 0
+}
+
+func hasSequenceExtension(packetType uint8) bool {
+	return packetFlags[packetType]&packetFlagSequence != 0
+}
+
+func hasFragmentExtension(packetType uint8) bool {
+	return packetFlags[packetType]&packetFlagFragment != 0
+}
+
+func hasCompressionExtension(packetType uint8) bool {
+	return packetFlags[packetType]&packetFlagCompression != 0
+}
+
+func buildPacketFlags() [256]uint8 {
+	var flags [256]uint8
+
+	setValid := func(packetType uint8) {
+		flags[packetType] |= packetFlagValid
+	}
+	set := func(packetType uint8, extra uint8) {
+		flags[packetType] |= packetFlagValid | extra
+	}
+
+	validOnly := [...]uint8{
+		enums.PacketMTUUpRes,
+		enums.PacketMTUDownReq,
+		enums.PacketSessionInit,
+		enums.PacketSessionAccept,
+		enums.PacketSetMTUReq,
+		enums.PacketSetMTURes,
+		enums.PacketPing,
+		enums.PacketPong,
+		enums.PacketErrorDrop,
+	}
+	for _, packetType := range validOnly {
+		setValid(packetType)
+	}
+
+	streamAndSeq := [...]uint8{
+		enums.PacketStreamSyn,
+		enums.PacketStreamSynAck,
+		enums.PacketStreamData,
+		enums.PacketStreamDataAck,
+		enums.PacketStreamResend,
+		enums.PacketStreamFin,
+		enums.PacketStreamFinAck,
+		enums.PacketStreamRST,
+		enums.PacketStreamRSTAck,
+		enums.PacketStreamKeepalive,
+		enums.PacketStreamKeepaliveAck,
+		enums.PacketStreamWindowUpdate,
+		enums.PacketStreamWindowUpdateAck,
+		enums.PacketStreamProbe,
+		enums.PacketStreamProbeAck,
+		enums.PacketMTUUpReq,
+		enums.PacketMTUDownRes,
+		enums.PacketSocks5Syn,
+		enums.PacketSocks5SynAck,
+		enums.PacketSocks5ConnectFail,
+		enums.PacketSocks5ConnectFailAck,
+		enums.PacketSocks5RulesetDenied,
+		enums.PacketSocks5RulesetDeniedAck,
+		enums.PacketSocks5NetworkUnreachable,
+		enums.PacketSocks5NetworkUnreachableAck,
+		enums.PacketSocks5HostUnreachable,
+		enums.PacketSocks5HostUnreachableAck,
+		enums.PacketSocks5ConnectionRefused,
+		enums.PacketSocks5ConnectionRefusedAck,
+		enums.PacketSocks5TTLExpired,
+		enums.PacketSocks5TTLExpiredAck,
+		enums.PacketSocks5CommandUnsupported,
+		enums.PacketSocks5CommandUnsupportedAck,
+		enums.PacketSocks5AddressTypeUnsupported,
+		enums.PacketSocks5AddressTypeUnsupportedAck,
+		enums.PacketSocks5AuthFailed,
+		enums.PacketSocks5AuthFailedAck,
+		enums.PacketSocks5UpstreamUnavailable,
+		enums.PacketSocks5UpstreamUnavailableAck,
+		enums.PacketDNSQueryReq,
+		enums.PacketDNSQueryRes,
+	}
+	for _, packetType := range streamAndSeq {
+		set(packetType, packetFlagStream|packetFlagSequence)
+	}
+
+	frag := [...]uint8{
+		enums.PacketStreamData,
+		enums.PacketStreamResend,
+		enums.PacketMTUUpReq,
+		enums.PacketMTUDownRes,
+		enums.PacketSocks5Syn,
+		enums.PacketDNSQueryReq,
+		enums.PacketDNSQueryRes,
+	}
+	for _, packetType := range frag {
+		flags[packetType] |= packetFlagFragment
+	}
+
+	comp := [...]uint8{
+		enums.PacketStreamData,
+		enums.PacketStreamResend,
+		enums.PacketPackedControlBlocks,
+		enums.PacketDNSQueryReq,
+		enums.PacketDNSQueryRes,
+	}
+	for _, packetType := range comp {
+		flags[packetType] |= packetFlagValid | packetFlagCompression
+	}
+
+	return flags
+}

@@ -20,6 +20,7 @@ import (
 	"masterdnsvpn-go/internal/domainmatcher"
 	"masterdnsvpn-go/internal/logger"
 	"masterdnsvpn-go/internal/security"
+	"masterdnsvpn-go/internal/vpnproto"
 )
 
 type Server struct {
@@ -267,7 +268,35 @@ func (s *Server) handlePacket(packet []byte) []byte {
 	}
 }
 
-func (s *Server) handleTunnelCandidate(packet []byte, parsed dnsparser.LitePacket, _ domainmatcher.Decision) []byte {
+func (s *Server) handleTunnelCandidate(packet []byte, parsed dnsparser.LitePacket, decision domainmatcher.Decision) []byte {
+	vpnPacket, err := vpnproto.ParseFromLabels(decision.Labels, s.codec)
+	if err != nil {
+		s.log.Debugf(
+			"[VPN] <yellow>Failed To Parse VPN Packet</yellow> id=<cyan>%d</cyan> domain=<yellow>%s</yellow> err=<yellow>%v</yellow>",
+			parsed.Header.ID,
+			decision.RequestName,
+			err,
+		)
+		response, responseErr := dnsparser.BuildEmptyNoErrorResponseFromLite(packet, parsed)
+		if responseErr != nil {
+			return nil
+		}
+		return response
+	}
+
+	s.log.Debugf(
+		"[VPN] <green>Parsed VPN Packet</green> id=<cyan>%d</cyan> sid=<magenta>%d</magenta> ptype=<magenta>%d</magenta> stream=<magenta>%d</magenta> seq=<magenta>%d</magenta> frag=<magenta>%d</magenta>/<magenta>%d</magenta> comp=<magenta>%d</magenta> payload_len=<cyan>%d</cyan>",
+		parsed.Header.ID,
+		vpnPacket.SessionID,
+		vpnPacket.PacketType,
+		vpnPacket.StreamID,
+		vpnPacket.SequenceNum,
+		vpnPacket.FragmentID,
+		vpnPacket.TotalFragments,
+		vpnPacket.CompressionType,
+		len(vpnPacket.Payload),
+	)
+
 	response, responseErr := dnsparser.BuildEmptyNoErrorResponseFromLite(packet, parsed)
 	if responseErr != nil {
 		return nil
