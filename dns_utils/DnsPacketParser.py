@@ -71,6 +71,8 @@ class DnsPacketParser:
             Packet_Type.SOCKS5_AUTH_FAILED_ACK,
             Packet_Type.SOCKS5_UPSTREAM_UNAVAILABLE,
             Packet_Type.SOCKS5_UPSTREAM_UNAVAILABLE_ACK,
+            Packet_Type.DNS_QUERY_REQ,
+            Packet_Type.DNS_QUERY_RES,
         }
     )
 
@@ -121,6 +123,8 @@ class DnsPacketParser:
             Packet_Type.SOCKS5_AUTH_FAILED_ACK,
             Packet_Type.SOCKS5_UPSTREAM_UNAVAILABLE,
             Packet_Type.SOCKS5_UPSTREAM_UNAVAILABLE_ACK,
+            Packet_Type.DNS_QUERY_REQ,
+            Packet_Type.DNS_QUERY_RES,
         }
     )
 
@@ -132,6 +136,8 @@ class DnsPacketParser:
             Packet_Type.MTU_UP_REQ,
             Packet_Type.MTU_DOWN_RES,
             Packet_Type.SOCKS5_SYN,
+            Packet_Type.DNS_QUERY_REQ,
+            Packet_Type.DNS_QUERY_RES,
         }
     )
 
@@ -145,6 +151,8 @@ class DnsPacketParser:
             Packet_Type.STREAM_DATA,
             Packet_Type.STREAM_RESEND,
             Packet_Type.PACKED_CONTROL_BLOCKS,
+            Packet_Type.DNS_QUERY_REQ,
+            Packet_Type.DNS_QUERY_RES,
         }
     )
     _VALID_PACKET_TYPES = frozenset(

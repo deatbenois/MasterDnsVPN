@@ -69,6 +69,8 @@ class PacketQueueMixin:
     _FRAGMENT_KEYED_QUEUE_TYPES = {
         Packet_Type.SOCKS5_SYN,
         Packet_Type.SOCKS5_SYN_ACK,
+        Packet_Type.DNS_QUERY_REQ,
+        Packet_Type.DNS_QUERY_RES,
     }
     # These packet types are never meant to live in tx queues directly.
     _DROP_QUEUE_TYPES = {

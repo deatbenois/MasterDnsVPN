@@ -13,6 +13,7 @@ import os
 import random
 import signal
 import socket
+import struct
 import sys
 import time
 from bisect import bisect_left, bisect_right, insort
@@ -32,6 +33,7 @@ from dns_utils.config_loader import get_config_path, load_config
 from dns_utils.DNS_ENUMS import DNS_Record_Type, Packet_Type
 from dns_utils.DNSBalancer import DNSBalancer
 from dns_utils.DnsPacketParser import DnsPacketParser
+from dns_utils.DnsResponseCache import DnsResponseCache
 from dns_utils.PacketQueueMixin import PacketQueueMixin
 from dns_utils.PingManager import PingManager
 from dns_utils.PrependReader import PrependReader
@@ -129,9 +131,45 @@ class MasterDnsVPNClient(PacketQueueMixin):
             sorted((d.lower() for d in self.domains), key=len, reverse=True)
         )
         self.timeout: float = self.config.get("DNS_QUERY_TIMEOUT", 5.0)
+        self.dns_tunnel_query_timeout: float = float(
+            self.config.get("DNS_TUNNEL_QUERY_TIMEOUT", max(8.0, self.timeout * 2.0))
+        )
         self.listener_ip = self.config.get("LISTEN_IP", "127.0.0.1")
         self.listener_port = int(self.config.get("LISTEN_PORT", 1080))
         self.buffer_size = 65507  # Max UDP payload size
+        self.local_dns_enabled = bool(self.config.get("LOCAL_DNS_ENABLED", False))
+        self.local_dns_ip = str(self.config.get("LOCAL_DNS_IP", "127.0.0.1"))
+        self.local_dns_port = int(self.config.get("LOCAL_DNS_PORT", 5353))
+        self.local_dns_workers = max(1, int(self.config.get("LOCAL_DNS_WORKERS", 2)))
+        self.dns_cache_flush_interval = max(
+            5.0, float(self.config.get("DNS_CACHE_FLUSH_INTERVAL_SECONDS", 30.0))
+        )
+        cache_file_name = str(self.config.get("DNS_CACHE_FILE", "dns_cache.json"))
+        cache_file_path = (
+            cache_file_name
+            if os.path.isabs(cache_file_name)
+            else get_config_path(cache_file_name)
+        )
+        self.dns_cache = DnsResponseCache(
+            max_records=int(self.config.get("DNS_CACHE_MAX_RECORDS", 2000)),
+            ttl_seconds=float(self.config.get("DNS_CACHE_TTL_SECONDS", 3600.0)),
+            file_path=cache_file_path,
+            persist_to_file=bool(self.config.get("DNS_CACHE_ENABLED", True)),
+        )
+        self.dns_cache.load_from_file()
+        self.pending_dns_queries = {}
+        self.pending_dns_queries_by_key = {}
+        self.pending_dns_response_fragments = {}
+        self.recent_dns_request_ids = {}
+        self.next_dns_request_id = random.randint(1, 65535)
+        self.dns_fragment_assembly_timeout = max(
+            10.0, self.dns_tunnel_query_timeout * 2.0
+        )
+        self.dns_tunnel_query_retries = max(
+            1, int(self.config.get("DNS_TUNNEL_QUERY_RETRIES", 2))
+        )
+        self.local_dns_sock = None
+        self.local_dns_request_queue = None
 
         # ---------------------------------------------------------
         # MTU, batching and queueing configuration
@@ -2090,6 +2128,7 @@ class MasterDnsVPNClient(PacketQueueMixin):
         while not self.should_stop.is_set() and not self.session_restart_event.is_set():
             try:
                 self._collect_expired_pending_timeouts()
+                self._purge_pending_dns_response_fragments()
                 if (
                     self.auto_disable_timeout_servers
                     and self.balancer.valid_servers_count > 1
@@ -2308,7 +2347,7 @@ class MasterDnsVPNClient(PacketQueueMixin):
                     return False
 
                 response = await self._send_and_receive_dns(
-                    dns_queries[0], resolver, dns_port, 2.0
+                    dns_queries[0], resolver, dns_port, 1.0
                 )
 
                 if response:
@@ -2651,6 +2690,7 @@ class MasterDnsVPNClient(PacketQueueMixin):
         self.track_fragment_packets = set()
         self.rx_tasks = set()
         self.server_health.clear()
+        self._cancel_pending_dns_queries()
 
         ping_mgr = getattr(self, "ping_manager", None)
         if ping_mgr:
@@ -2690,6 +2730,410 @@ class MasterDnsVPNClient(PacketQueueMixin):
             ping_mgr.active_connections = 0
             ping_mgr.last_data_activity = now
             ping_mgr.last_ping_time = now
+
+        self._cancel_pending_dns_queries()
+
+    def _cancel_pending_dns_queries(self) -> None:
+        pending = list(self.pending_dns_queries.values())
+        pending_entries = list(self.pending_dns_queries_by_key.values())
+        self.pending_dns_queries.clear()
+        self.pending_dns_queries_by_key.clear()
+        for entry in pending_entries:
+            task = entry.get("task") if isinstance(entry, dict) else None
+            if task and not task.done():
+                task.cancel()
+        for future in pending:
+            if future and not future.done():
+                future.cancel()
+        self.pending_dns_response_fragments.clear()
+        self.recent_dns_request_ids.clear()
+
+    def _extract_dns_query_metadata(
+        self, raw_query: bytes
+    ) -> tuple[bytes, int, int] | None:
+        if not raw_query or len(raw_query) < 17:
+            return None
+        try:
+            query_id = raw_query[:2]
+            qdcount = struct.unpack(">H", raw_query[4:6])[0]
+            if qdcount < 1:
+                return None
+
+            offset = 12
+            label_loops = 0
+            while True:
+                if offset >= len(raw_query):
+                    return None
+                length = raw_query[offset]
+                offset += 1
+                if length == 0:
+                    break
+                if length & 0xC0 or (offset + length) > len(raw_query):
+                    return None
+                offset += length
+                label_loops += 1
+                if label_loops > 127:
+                    return None
+
+            if offset + 4 > len(raw_query):
+                return None
+
+            qtype, qclass = struct.unpack(">HH", raw_query[offset : offset + 4])
+            return query_id, int(qtype), int(qclass)
+        except Exception:
+            return None
+
+    def _describe_dns_query(self, raw_query: bytes) -> tuple[str, str]:
+        if not raw_query or len(raw_query) < 17:
+            return "?", "UNKNOWN"
+        try:
+            offset = 12
+            labels = []
+            label_loops = 0
+            while True:
+                if offset >= len(raw_query):
+                    return "?", "UNKNOWN"
+                length = raw_query[offset]
+                offset += 1
+                if length == 0:
+                    break
+                if length & 0xC0 or (offset + length) > len(raw_query):
+                    return "?", "UNKNOWN"
+                labels.append(
+                    raw_query[offset : offset + length].decode("ascii", errors="ignore")
+                )
+                offset += length
+                label_loops += 1
+                if label_loops > 127:
+                    return "?", "UNKNOWN"
+
+            if offset + 4 > len(raw_query):
+                return ".".join(labels).rstrip(".") or "?", "UNKNOWN"
+
+            qtype = struct.unpack(">H", raw_query[offset : offset + 2])[0]
+            qtype_name = next(
+                (
+                    name
+                    for name, value in DNS_Record_Type.__dict__.items()
+                    if not name.startswith("__") and value == qtype
+                ),
+                str(qtype),
+            )
+            return ".".join(labels).rstrip(".") or "?", qtype_name
+        except Exception:
+            return "?", "UNKNOWN"
+
+    def _is_supported_dns_query(self, raw_query: bytes) -> bool:
+        meta = self._extract_dns_query_metadata(raw_query)
+        if not meta:
+            return False
+        _, qtype, qclass = meta
+        if qclass != 1:
+            return False
+        return qtype in {
+            DNS_Record_Type.A,
+            DNS_Record_Type.AAAA,
+            DNS_Record_Type.CNAME,
+            DNS_Record_Type.MX,
+            DNS_Record_Type.NS,
+            DNS_Record_Type.TXT,
+            DNS_Record_Type.PTR,
+            DNS_Record_Type.SRV,
+            DNS_Record_Type.HTTPS,
+            DNS_Record_Type.SVCB,
+            DNS_Record_Type.CAA,
+            DNS_Record_Type.NAPTR,
+            DNS_Record_Type.SOA,
+        }
+
+    def _build_dns_error_response(self, raw_query: bytes, rcode: int = 2) -> bytes:
+        if not raw_query or len(raw_query) < 12:
+            return b""
+        try:
+            response = bytearray(raw_query)
+            flags = struct.unpack(">H", response[2:4])[0]
+            rd = flags & 0x0100
+            response_flags = 0x8000 | 0x0080 | rd | (int(rcode) & 0x000F)
+            response[2:4] = struct.pack(">H", response_flags)
+            response[6:12] = b"\x00\x00\x00\x00\x00\x00"
+            return bytes(response)
+        except Exception:
+            return b""
+
+    def _next_dns_query_request_id(self) -> int:
+        self._purge_recent_dns_request_ids()
+        start = (self.next_dns_request_id + 1) & 0xFFFF
+        if start <= 0:
+            start = 1
+        request_id = start
+        while (
+            request_id in self.pending_dns_queries
+            or request_id in self.recent_dns_request_ids
+        ):
+            request_id = (request_id + 1) & 0xFFFF
+            if request_id <= 0:
+                request_id = 1
+            if request_id == start:
+                return 0
+        self.next_dns_request_id = request_id
+        return request_id
+
+    def _purge_recent_dns_request_ids(self, now: float | None = None) -> None:
+        now = time.monotonic() if now is None else now
+        expired = [
+            request_id
+            for request_id, release_at in self.recent_dns_request_ids.items()
+            if float(release_at or 0.0) <= now
+        ]
+        for request_id in expired:
+            self.recent_dns_request_ids.pop(request_id, None)
+
+    def _purge_pending_dns_response_fragments(self, now: float | None = None) -> None:
+        now = time.monotonic() if now is None else now
+        self._purge_recent_dns_request_ids(now)
+        cutoff = now - self.dns_fragment_assembly_timeout
+        expired = [
+            request_id
+            for request_id, entry in self.pending_dns_response_fragments.items()
+            if float(entry.get("created_at", 0.0) or 0.0) < cutoff
+        ]
+        for request_id in expired:
+            self.pending_dns_response_fragments.pop(request_id, None)
+
+    def _collect_dns_response_fragment(
+        self, request_id: int, payload: bytes, header: dict
+    ) -> bytes | None:
+        total_fragments = int(header.get("total_fragments", 1) or 1)
+        fragment_id = int(header.get("fragment_id", 0) or 0)
+        total_data_length = int(header.get("total_data_length", 0) or 0)
+
+        if total_fragments <= 1:
+            return payload or b""
+
+        if (
+            total_fragments < 1
+            or total_fragments > 255
+            or fragment_id < 0
+            or fragment_id >= total_fragments
+        ):
+            self.pending_dns_response_fragments.pop(request_id, None)
+            return b""
+
+        now = time.monotonic()
+        self._purge_pending_dns_response_fragments(now)
+        entry = self.pending_dns_response_fragments.get(request_id)
+        if (
+            entry is None
+            or int(entry.get("total_fragments", 0) or 0) != total_fragments
+            or int(entry.get("total_data_length", 0) or 0) != total_data_length
+        ):
+            entry = {
+                "created_at": now,
+                "total_fragments": total_fragments,
+                "total_data_length": total_data_length,
+                "chunks": {},
+            }
+            self.pending_dns_response_fragments[request_id] = entry
+
+        chunks = entry.setdefault("chunks", {})
+        chunks[fragment_id] = payload or b""
+        if len(chunks) < total_fragments:
+            return None
+
+        assembled = b"".join(chunks[idx] for idx in range(total_fragments))
+        if total_data_length > 0:
+            assembled = assembled[:total_data_length]
+        self.pending_dns_response_fragments.pop(request_id, None)
+        return assembled
+
+    async def _run_dns_query_tunnel_request(
+        self,
+        cache_key: bytes,
+        request_id: int,
+        raw_query: bytes,
+        future: asyncio.Future,
+    ) -> None:
+        response = b""
+        qname, qtype_name = self._describe_dns_query(raw_query)
+        try:
+            self.logger.debug(
+                f"<green>DNS query requested over tunnel: <cyan>{qname}</cyan> "
+                f"(<yellow>{qtype_name}</yellow>) [request_id={request_id}]</green>"
+            )
+            for attempt_idx in range(self.dns_tunnel_query_retries):
+                await self._enqueue_packet(
+                    0,
+                    0,
+                    request_id,
+                    Packet_Type.DNS_QUERY_REQ,
+                    raw_query,
+                )
+                try:
+                    response = await asyncio.wait_for(
+                        asyncio.shield(future),
+                        timeout=self.dns_tunnel_query_timeout,
+                    )
+                    break
+                except asyncio.TimeoutError:
+                    if attempt_idx + 1 >= self.dns_tunnel_query_retries:
+                        break
+                    if future.done():
+                        break
+                    continue
+            if response:
+                self.dns_cache.set(cache_key, response)
+                self.logger.debug(
+                    f"<green>DNS resolved over tunnel: <cyan>{qname}</cyan> "
+                    f"(<yellow>{qtype_name}</yellow>) [request_id={request_id}]</green>"
+                )
+        except asyncio.CancelledError:
+            pass
+        finally:
+            current = self.pending_dns_queries_by_key.get(cache_key)
+            if current and current.get("request_id") == request_id:
+                self.pending_dns_queries_by_key.pop(cache_key, None)
+            self.pending_dns_queries.pop(request_id, None)
+            if not future.done():
+                future.set_result(response)
+            self.recent_dns_request_ids[request_id] = (
+                time.monotonic() + self.dns_fragment_assembly_timeout
+            )
+
+    async def _resolve_dns_query_over_tunnel(self, raw_query: bytes) -> bytes:
+        if not raw_query or not self._is_supported_dns_query(raw_query):
+            return self._build_dns_error_response(raw_query, rcode=4)
+
+        meta = self._extract_dns_query_metadata(raw_query)
+        if not meta:
+            return self._build_dns_error_response(raw_query, rcode=1)
+        query_id = meta[0]
+        qname, qtype_name = self._describe_dns_query(raw_query)
+        cache_key = self.dns_cache.normalize_query_key(raw_query)
+        cached = self.dns_cache.get(cache_key, query_id, raw_query)
+        if cached:
+            self.logger.debug(
+                f"<green>DNS cache hit: <cyan>{qname}</cyan> "
+                f"(<yellow>{qtype_name}</yellow>)</green>"
+            )
+            return cached
+
+        if not self.session_id or (
+            self.session_restart_event and self.session_restart_event.is_set()
+        ):
+            return self._build_dns_error_response(raw_query, rcode=2)
+
+        inflight = self.pending_dns_queries_by_key.get(cache_key)
+        if inflight is not None:
+            future = inflight.get("future")
+            if future and future.done():
+                try:
+                    response = future.result()
+                    if response:
+                        self.logger.debug(
+                            f"<green>DNS inflight result reused: <cyan>{qname}</cyan> "
+                            f"(<yellow>{qtype_name}</yellow>)</green>"
+                        )
+                        return self.dns_cache.patch_response_for_query(
+                            response, raw_query
+                        )
+                except Exception:
+                    pass
+            if future and not future.done():
+                try:
+                    response = await asyncio.wait_for(
+                        asyncio.shield(future),
+                        timeout=self.dns_tunnel_query_timeout
+                        * max(1, self.dns_tunnel_query_retries),
+                    )
+                    if response:
+                        self.logger.debug(
+                            f"<green>DNS inflight wait completed: <cyan>{qname}</cyan> "
+                            f"(<yellow>{qtype_name}</yellow>)</green>"
+                        )
+                        return self.dns_cache.patch_response_for_query(
+                            response, raw_query
+                        )
+                except (asyncio.TimeoutError, asyncio.CancelledError):
+                    return self._build_dns_error_response(raw_query, rcode=2)
+
+        request_id = self._next_dns_query_request_id()
+        if request_id <= 0:
+            return self._build_dns_error_response(raw_query, rcode=2)
+
+        future = self.loop.create_future()
+        inflight = {
+            "request_id": request_id,
+            "future": future,
+            "created_at": time.monotonic(),
+            "task": self.loop.create_task(
+                self._run_dns_query_tunnel_request(
+                    cache_key, request_id, raw_query, future
+                )
+            ),
+        }
+        self.pending_dns_queries[request_id] = future
+        self.pending_dns_queries_by_key[cache_key] = inflight
+        try:
+            response = await asyncio.wait_for(
+                asyncio.shield(future),
+                timeout=self.dns_tunnel_query_timeout
+                * max(1, self.dns_tunnel_query_retries),
+            )
+            if response:
+                return self.dns_cache.patch_response_for_query(response, raw_query)
+            return self._build_dns_error_response(raw_query, rcode=2)
+        except (asyncio.TimeoutError, asyncio.CancelledError):
+            return self._build_dns_error_response(raw_query, rcode=2)
+        finally:
+            pass
+
+    def _build_socks5_udp_response(
+        self, atyp: int, addr_bytes: bytes, port: int, payload: bytes
+    ) -> bytes:
+        return (
+            b"\x00\x00\x00"
+            + bytes([int(atyp) & 0xFF])
+            + (addr_bytes or b"")
+            + int(port).to_bytes(2, "big")
+            + (payload or b"")
+        )
+
+    def _parse_socks5_udp_request(
+        self, data: bytes
+    ) -> tuple[int, bytes, int, bytes] | None:
+        if not data or len(data) < 10 or data[:2] != b"\x00\x00":
+            return None
+        if data[2] != 0x00:
+            return None
+
+        atyp = data[3]
+        offset = 4
+        if atyp == 0x01:
+            if len(data) < offset + 4 + 2:
+                return None
+            addr_bytes = data[offset : offset + 4]
+            offset += 4
+        elif atyp == 0x03:
+            if len(data) < offset + 1:
+                return None
+            dlen = data[offset]
+            offset += 1
+            if len(data) < offset + dlen + 2:
+                return None
+            addr_bytes = bytes([dlen]) + data[offset : offset + dlen]
+            offset += dlen
+        elif atyp == 0x04:
+            if len(data) < offset + 16 + 2:
+                return None
+            addr_bytes = data[offset : offset + 16]
+            offset += 16
+        else:
+            return None
+
+        port = int.from_bytes(data[offset : offset + 2], "big")
+        offset += 2
+        payload = data[offset:]
+        return atyp, addr_bytes, port, payload
 
     async def _main_tunnel_loop(self):
         """Start local TCP server and main worker tasks."""
@@ -2818,12 +3262,25 @@ class MasterDnsVPNClient(PacketQueueMixin):
 
             self.workers.append(self.loop.create_task(self._retransmit_worker()))
             self.workers.append(self.loop.create_task(self.ping_manager.ping_loop()))
+            self.workers.append(self.loop.create_task(self._dns_cache_flush_worker()))
             self.workers.append(
                 self.loop.create_task(self._runtime_timeout_guard_worker())
             )
             self.workers.append(
                 self.loop.create_task(self._recheck_inactive_servers_worker())
             )
+
+            if self.local_dns_enabled:
+                self.local_dns_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+                self.local_dns_sock.setblocking(False)
+                self.local_dns_sock.bind((self.local_dns_ip, self.local_dns_port))
+                self.local_dns_request_queue = asyncio.Queue(maxsize=512)
+                self.logger.info(
+                    f"<green>Local DNS server started on <cyan>{self.local_dns_ip}:{self.local_dns_port}</cyan></green>"
+                )
+                self.workers.append(self.loop.create_task(self._local_dns_recv_loop()))
+                for _ in range(self.local_dns_workers):
+                    self.workers.append(self.loop.create_task(self._local_dns_worker()))
 
             stop_task = asyncio.create_task(self.should_stop.wait())
             restart_task = asyncio.create_task(self.session_restart_event.wait())
@@ -2886,6 +3343,14 @@ class MasterDnsVPNClient(PacketQueueMixin):
                 except Exception:
                     pass
                 self.tunnel_sock = None
+            if self.local_dns_sock:
+                try:
+                    self.local_dns_sock.close()
+                except Exception:
+                    pass
+                self.local_dns_sock = None
+            self.local_dns_request_queue = None
+            self.dns_cache.save_to_file()
 
             self._clear_runtime_state_after_disconnect()
 
@@ -2939,6 +3404,150 @@ class MasterDnsVPNClient(PacketQueueMixin):
                 await asyncio.wait_for(writer.wait_closed(), timeout=0.5)
         except Exception:
             pass
+
+    async def _dns_cache_flush_worker(self):
+        while not self.should_stop.is_set() and not self.session_restart_event.is_set():
+            try:
+                await asyncio.sleep(self.dns_cache_flush_interval)
+                self.dns_cache.save_to_file()
+            except asyncio.CancelledError:
+                break
+            except Exception:
+                await asyncio.sleep(1.0)
+
+    async def _local_dns_recv_loop(self):
+        while not self.should_stop.is_set() and not self.session_restart_event.is_set():
+            try:
+                data, addr = await async_recvfrom(
+                    self.loop, self.local_dns_sock, self.buffer_size
+                )
+                if not data or not addr:
+                    continue
+                if self.local_dns_request_queue is None:
+                    continue
+                try:
+                    self.local_dns_request_queue.put_nowait((data, addr))
+                except asyncio.QueueFull:
+                    error_response = self._build_dns_error_response(data, rcode=2)
+                    if error_response:
+                        await async_sendto(
+                            self.loop, self.local_dns_sock, error_response, addr
+                        )
+            except asyncio.CancelledError:
+                break
+            except Exception:
+                await asyncio.sleep(0.01)
+
+    async def _local_dns_worker(self):
+        while not self.should_stop.is_set() and not self.session_restart_event.is_set():
+            try:
+                if self.local_dns_request_queue is None:
+                    await asyncio.sleep(0.1)
+                    continue
+                query, addr = await self.local_dns_request_queue.get()
+                try:
+                    response = await self._resolve_dns_query_over_tunnel(query)
+                    if response and self.local_dns_sock:
+                        await async_sendto(
+                            self.loop, self.local_dns_sock, response, addr
+                        )
+                finally:
+                    self.local_dns_request_queue.task_done()
+            except asyncio.CancelledError:
+                break
+            except Exception:
+                await asyncio.sleep(0.05)
+
+    async def _run_socks5_udp_associate(self, reader, writer):
+        bind_ip = self.listener_ip
+        if bind_ip in ("0.0.0.0", "::"):
+            try:
+                bind_ip = str(writer.get_extra_info("sockname")[0] or "127.0.0.1")
+            except Exception:
+                bind_ip = "127.0.0.1"
+        if ":" in bind_ip:
+            bind_ip = "127.0.0.1"
+
+        udp_sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        try:
+            udp_sock.setblocking(False)
+            udp_sock.bind((bind_ip, 0))
+            udp_host, udp_port = udp_sock.getsockname()
+            reply = (
+                b"\x05\x00\x00\x01"
+                + socket.inet_aton(udp_host)
+                + int(udp_port).to_bytes(2, "big")
+            )
+            writer.write(reply)
+            await writer.drain()
+
+            peer_addr = None
+            while not self.should_stop.is_set() and not writer.is_closing():
+                if reader.at_eof():
+                    break
+                try:
+                    datagram, addr = await asyncio.wait_for(
+                        async_recvfrom(self.loop, udp_sock, self.buffer_size),
+                        timeout=0.5,
+                    )
+                except asyncio.TimeoutError:
+                    continue
+                if not datagram or not addr:
+                    continue
+                if peer_addr is None:
+                    peer_addr = addr
+                elif addr != peer_addr:
+                    continue
+
+                parsed = self._parse_socks5_udp_request(datagram)
+                if not parsed:
+                    continue
+                atyp, addr_bytes, port, payload = parsed
+                if port != 53:
+                    continue
+
+                dns_task = self.loop.create_task(
+                    self._resolve_dns_query_over_tunnel(payload)
+                )
+                tcp_close_task = self.loop.create_task(reader.read(1))
+                done, pending = await asyncio.wait(
+                    [dns_task, tcp_close_task],
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+                for task in pending:
+                    task.cancel()
+                await asyncio.gather(*pending, return_exceptions=True)
+
+                if tcp_close_task in done:
+                    tcp_payload = tcp_close_task.result()
+                    if not tcp_payload:
+                        if not dns_task.done():
+                            dns_task.cancel()
+                            await asyncio.gather(dns_task, return_exceptions=True)
+                        break
+                if dns_task not in done:
+                    continue
+                try:
+                    response = dns_task.result()
+                except Exception:
+                    response = b""
+                if not response:
+                    response = self._build_dns_error_response(payload, rcode=2)
+                if not response:
+                    continue
+                if writer.is_closing() or reader.at_eof():
+                    break
+
+                socks_response = self._build_socks5_udp_response(
+                    atyp, addr_bytes, port, response
+                )
+                await async_sendto(self.loop, udp_sock, socks_response, addr)
+        finally:
+            try:
+                udp_sock.close()
+            except Exception:
+                pass
+            await self._close_writer_safely(writer)
 
     def _new_get_stream_id(self):
         start = (self.last_stream_id + 1) or 1
@@ -3108,19 +3717,6 @@ class MasterDnsVPNClient(PacketQueueMixin):
                     return
 
                 cmd = req_header[1]
-                # We only support TCP CONNECT (0x01)
-                if cmd != 0x01:
-                    if cmd == 0x03:
-                        self.logger.debug(
-                            "<yellow>SOCKS5 UDP Associate requested. Rejecting gracefully (Not Supported).</yellow>"
-                        )
-                    writer.write(
-                        b"\x05\x07\x00\x01\x00\x00\x00\x00\x00\x00"
-                    )  # Command not supported
-                    await writer.drain()
-                    await self._close_writer_safely(writer)
-                    return
-
                 atyp = req_header[3]
                 target_addr_bytes = b""
                 if atyp == 0x01:  # IPv4
@@ -3135,6 +3731,20 @@ class MasterDnsVPNClient(PacketQueueMixin):
                     return
 
                 target_port_bytes = await reader.readexactly(2)
+
+                if cmd == 0x03:
+                    self.logger.debug(
+                        "<yellow>SOCKS5 UDP Associate requested. Enabling DNS-only UDP relay.</yellow>"
+                    )
+                    await self._run_socks5_udp_associate(reader, writer)
+                    return
+
+                # We only support TCP CONNECT (0x01) and DNS-only UDP ASSOCIATE (0x03).
+                if cmd != 0x01:
+                    writer.write(b"\x05\x07\x00\x01\x00\x00\x00\x00\x00\x00")
+                    await writer.drain()
+                    await self._close_writer_safely(writer)
+                    return
 
                 # Format:  [ATYP] [ADDR_BYTES] [PORT_BYTES]
                 target_payload = bytes([atyp]) + target_addr_bytes + target_port_bytes
@@ -3732,6 +4342,17 @@ class MasterDnsVPNClient(PacketQueueMixin):
                 )
 
             self._send_ping_packet()
+            return
+
+        if ptype == Packet_Type.DNS_QUERY_RES:
+            if sn not in self.pending_dns_queries and sn in self.recent_dns_request_ids:
+                return
+            assembled_dns = self._collect_dns_response_fragment(sn, data or b"", header)
+            if assembled_dns is None:
+                return
+            dns_future = self.pending_dns_queries.get(sn)
+            if dns_future and not dns_future.done():
+                dns_future.set_result(assembled_dns)
             return
         if ptype == Packet_Type.STREAM_SYN_ACK and stream_id_exists:
             if stream_data.get("stream") or stream_data.get("status") == "ACTIVE":

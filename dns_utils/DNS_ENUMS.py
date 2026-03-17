@@ -76,6 +76,10 @@ class Packet_Type:
     SOCKS5_UPSTREAM_UNAVAILABLE = 0x2F  # Upstream SOCKS is unavailable/unresponsive
     SOCKS5_UPSTREAM_UNAVAILABLE_ACK = 0x30  # ACK for SOCKS5_UPSTREAM_UNAVAILABLE
 
+    # DNS-over-tunnel request/response
+    DNS_QUERY_REQ = 0x31  # Client requests upstream DNS resolution
+    DNS_QUERY_RES = 0x32  # Server returns raw DNS response bytes
+
     # System/control
     ERROR_DROP = 0xFF  # Invalid/Drop signal
 

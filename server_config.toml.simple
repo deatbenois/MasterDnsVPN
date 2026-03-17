@@ -54,6 +54,16 @@ SOCKS_HANDSHAKE_TIMEOUT = 180.0
 # A moderate default is safer on bursty / lossy links.
 MAX_CONCURRENT_SOCKS_CONNECTS = 16
 
+# Upstream DNS resolvers used for DNS-over-tunnel requests coming from the client.
+# Format supports IPv4:PORT, host:PORT, or [IPv6]:PORT.
+DNS_UPSTREAM_SERVERS = ["1.1.1.1:53", "8.8.8.8:53"]
+DNS_UPSTREAM_TIMEOUT = 4.0
+
+# In-memory DNS cache for tunnel-resolved answers.
+# Each entry stays valid for DNS_CACHE_TTL_SECONDS after its last use.
+DNS_CACHE_MAX_RECORDS = 2000
+DNS_CACHE_TTL_SECONDS = 3600
+
 # If a non-pre-session packet arrives with an invalid session cookie, the server
 # does not force reconnect immediately. It only emits ERROR_DROP after this many
 # invalid-cookie hits for the same session inside the sliding window below.
