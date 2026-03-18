@@ -89,10 +89,8 @@ func isSupportedDNSQuery(qType uint16, qClass uint16) bool {
 		5,   // CNAME
 		15,  // MX
 		2,   // NS
-		16,  // TXT
 		12,  // PTR
 		33,  // SRV
-		65,  // HTTPS
 		64,  // SVCB
 		257, // CAA
 		35,  // NAPTR
