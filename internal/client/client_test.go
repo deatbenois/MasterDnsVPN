@@ -8,6 +8,7 @@
 package client
 
 import (
+	"context"
 	"encoding/binary"
 	"errors"
 	"testing"
@@ -666,6 +667,105 @@ func TestDispatchDNSQuerySplitsLargePayloadAcrossFragments(t *testing.T) {
 		if total != seenTotals[0] {
 			t.Fatalf("fragment total mismatch at %d: got=%d want=%d", i, total, seenTotals[0])
 		}
+	}
+}
+
+func TestStream0RuntimeQueuesPingAfterDNSActivity(t *testing.T) {
+	oldNoStreamThreshold := stream0PingIdleNoStreamThreshold
+	oldHighThreshold := stream0PingIdleHighThreshold
+	oldMediumThreshold := stream0PingIdleMediumThreshold
+	oldNoStreamInterval := stream0PingNoStreamInterval
+	oldHighInterval := stream0PingHighIdleInterval
+	oldMediumInterval := stream0PingMediumIdleInterval
+	oldBusyInterval := stream0PingBusyInterval
+	oldNoStreamSleep := stream0PingNoStreamMaxSleep
+	oldHighSleep := stream0PingHighIdleMaxSleep
+	oldMediumSleep := stream0PingMediumIdleMaxSleep
+	oldBusySleep := stream0PingBusyMaxSleep
+	stream0PingIdleNoStreamThreshold = 50 * time.Millisecond
+	stream0PingIdleHighThreshold = 25 * time.Millisecond
+	stream0PingIdleMediumThreshold = 10 * time.Millisecond
+	stream0PingNoStreamInterval = 25 * time.Millisecond
+	stream0PingHighIdleInterval = 20 * time.Millisecond
+	stream0PingMediumIdleInterval = 15 * time.Millisecond
+	stream0PingBusyInterval = 10 * time.Millisecond
+	stream0PingNoStreamMaxSleep = 10 * time.Millisecond
+	stream0PingHighIdleMaxSleep = 10 * time.Millisecond
+	stream0PingMediumIdleMaxSleep = 10 * time.Millisecond
+	stream0PingBusyMaxSleep = 10 * time.Millisecond
+	defer func() {
+		stream0PingIdleNoStreamThreshold = oldNoStreamThreshold
+		stream0PingIdleHighThreshold = oldHighThreshold
+		stream0PingIdleMediumThreshold = oldMediumThreshold
+		stream0PingNoStreamInterval = oldNoStreamInterval
+		stream0PingHighIdleInterval = oldHighInterval
+		stream0PingMediumIdleInterval = oldMediumInterval
+		stream0PingBusyInterval = oldBusyInterval
+		stream0PingNoStreamMaxSleep = oldNoStreamSleep
+		stream0PingHighIdleMaxSleep = oldHighSleep
+		stream0PingMediumIdleMaxSleep = oldMediumSleep
+		stream0PingBusyMaxSleep = oldBusySleep
+	}()
+
+	codec, err := security.NewCodec(0, "")
+	if err != nil {
+		t.Fatalf("NewCodec returned error: %v", err)
+	}
+
+	c := New(config.ClientConfig{
+		LocalDNSPendingTimeoutSec: 1,
+	}, nil, codec)
+	c.connections = []Connection{{
+		Domain:        "v.example.com",
+		Resolver:      "127.0.0.1",
+		ResolverPort:  5353,
+		ResolverLabel: "127.0.0.1:5353",
+		Key:           "127.0.0.1|5353|v.example.com",
+		IsValid:       true,
+	}}
+	c.connectionsByKey = map[string]int{c.connections[0].Key: 0}
+	c.rebuildBalancer()
+	c.sessionID = 7
+	c.sessionCookie = 9
+	c.responseMode = mtuProbeRawResponse
+
+	pingSeen := make(chan struct{}, 1)
+	c.exchangeQueryFn = func(conn Connection, packet []byte, timeout time.Duration) ([]byte, error) {
+		queryPacket, err := DnsParser.ParsePacketLite(packet)
+		if err != nil || !queryPacket.HasQuestion {
+			t.Fatalf("unexpected tunnel query: err=%v", err)
+		}
+		vpnPacket, err := VpnProto.ParseFromLabels(extractTestTunnelLabels(queryPacket.FirstQuestion.Name, "v.example.com"), c.codec)
+		if err != nil {
+			t.Fatalf("ParseFromLabels returned error: %v", err)
+		}
+		if vpnPacket.PacketType != Enums.PACKET_PING {
+			t.Fatalf("expected ping packet, got=%d", vpnPacket.PacketType)
+		}
+		select {
+		case pingSeen <- struct{}{}:
+		default:
+		}
+		return DnsParser.BuildVPNResponsePacket(packet, queryPacket.FirstQuestion.Name, VpnProto.Packet{
+			SessionID:     c.sessionID,
+			SessionCookie: c.sessionCookie,
+			PacketType:    Enums.PACKET_PONG,
+			Payload:       []byte("PO:test"),
+		}, false)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	if err := c.startStream0Runtime(ctx); err != nil {
+		t.Fatalf("startStream0Runtime returned error: %v", err)
+	}
+
+	c.stream0Runtime.NotifyDNSActivity()
+
+	select {
+	case <-pingSeen:
+	case <-time.After(time.Second):
+		t.Fatal("expected ping to be sent after dns activity")
 	}
 }
 

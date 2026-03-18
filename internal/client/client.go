@@ -49,6 +49,7 @@ type Client struct {
 
 	exchangeQueryFn func(Connection, []byte, time.Duration) ([]byte, error)
 	fragmentLimits  sync.Map
+	stream0Runtime  *stream0Runtime
 }
 
 type Connection struct {
@@ -100,6 +101,7 @@ func New(cfg config.ClientConfig, log *logger.Logger, codec *security.Codec) *Cl
 	c.uploadCompression = uint8(cfg.UploadCompressionType)
 	c.downloadCompression = uint8(cfg.DownloadCompressionType)
 	c.maxPackedBlocks = 1
+	c.stream0Runtime = newStream0Runtime(c)
 	return c
 }
 
@@ -171,6 +173,9 @@ func (c *Client) updateMaxPackedBlocks() {
 		c.syncedUploadMTU,
 		c.cfg.MaxPacketsPerBatch,
 	)
+	if c.stream0Runtime != nil {
+		c.stream0Runtime.SetMaxPackedBlocks(c.maxPackedBlocks)
+	}
 }
 
 func (c *Client) applySessionCompressionPolicy() {

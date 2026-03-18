@@ -370,6 +370,8 @@ func (s *Server) handleTunnelCandidate(packet []byte, parsed DnsParser.LitePacke
 		return s.handleMTUUpRequest(packet, parsed, decision, vpnPacket)
 	case Enums.PACKET_MTU_DOWN_REQ:
 		return s.handleMTUDownRequest(packet, parsed, decision, vpnPacket)
+	case Enums.PACKET_PING:
+		return s.handlePingRequest(packet, decision, vpnPacket)
 	case Enums.PACKET_DNS_QUERY_REQ:
 		return s.handleDNSQueryRequest(packet, parsed, decision, vpnPacket)
 	default:
@@ -562,6 +564,31 @@ func (s *Server) handleMTUDownRequest(questionPacket []byte, _ DnsParser.LitePac
 		TotalFragments: vpnPacket.TotalFragments,
 		Payload:        payload,
 	}, baseEncode)
+	if err != nil {
+		return nil
+	}
+	return response
+}
+
+func (s *Server) handlePingRequest(questionPacket []byte, decision domainmatcher.Decision, vpnPacket VpnProto.Packet) []byte {
+	sessionRecord, ok := s.sessions.Active(vpnPacket.SessionID)
+	if !ok {
+		return nil
+	}
+
+	payload := []byte{'P', 'O', ':'}
+	randomPart := make([]byte, 4)
+	if _, err := rand.Read(randomPart); err != nil {
+		return nil
+	}
+	payload = append(payload, randomPart...)
+
+	response, err := DnsParser.BuildVPNResponsePacket(questionPacket, decision.RequestName, VpnProto.Packet{
+		SessionID:     sessionRecord.ID,
+		SessionCookie: sessionRecord.Cookie,
+		PacketType:    Enums.PACKET_PONG,
+		Payload:       payload,
+	}, sessionRecord.ResponseMode == mtuProbeModeBase64)
 	if err != nil {
 		return nil
 	}

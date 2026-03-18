@@ -391,6 +391,56 @@ func TestHandlePacketAcceptsPostSessionPacketWithValidCookie(t *testing.T) {
 	}
 }
 
+func TestHandlePacketRespondsToPingWithPong(t *testing.T) {
+	codec, err := security.NewCodec(0, "")
+	if err != nil {
+		t.Fatalf("NewCodec returned error: %v", err)
+	}
+
+	srv := New(config.ServerConfig{
+		MaxPacketSize:     65535,
+		Domain:            []string{"a.com"},
+		MinVPNLabelLength: 3,
+	}, nil, codec)
+
+	verifyCode := []byte{0x10, 0x20, 0x30, 0x40}
+	initPayload := []byte{
+		0,
+		0x00,
+		0x00, 0x96,
+		0x00, 0xC8,
+		verifyCode[0], verifyCode[1], verifyCode[2], verifyCode[3],
+	}
+
+	initResponse := srv.handlePacket(buildTunnelQueryWithSessionID(t, codec, "a.com", 0, Enums.PACKET_SESSION_INIT, initPayload))
+	packet, err := DnsParser.ExtractVPNResponse(initResponse, false)
+	if err != nil {
+		t.Fatalf("ExtractVPNResponse returned error: %v", err)
+	}
+
+	sessionID := packet.Payload[0]
+	sessionCookie := packet.Payload[1]
+	pingQuery := buildTunnelQueryWithCookie(t, codec, "a.com", sessionID, sessionCookie, Enums.PACKET_PING, []byte("PO:test"))
+	response := srv.handlePacket(pingQuery)
+	if len(response) == 0 {
+		t.Fatal("expected pong response")
+	}
+
+	pongPacket, err := DnsParser.ExtractVPNResponse(response, false)
+	if err != nil {
+		t.Fatalf("ExtractVPNResponse returned error: %v", err)
+	}
+	if pongPacket.PacketType != Enums.PACKET_PONG {
+		t.Fatalf("unexpected packet type: got=%d want=%d", pongPacket.PacketType, Enums.PACKET_PONG)
+	}
+	if pongPacket.SessionID != sessionID || pongPacket.SessionCookie != sessionCookie {
+		t.Fatalf("unexpected session routing: sid=%d cookie=%d", pongPacket.SessionID, pongPacket.SessionCookie)
+	}
+	if len(pongPacket.Payload) != 7 || !bytes.Equal(pongPacket.Payload[:3], []byte("PO:")) {
+		t.Fatalf("unexpected pong payload: %q", pongPacket.Payload)
+	}
+}
+
 func TestSessionStoreExpiresReuseSignatureWithoutDroppingSession(t *testing.T) {
 	store := newSessionStore()
 	payload := []byte{1, 0x21, 0x00, 0x96, 0x00, 0xC8, 0x44, 0x33, 0x22, 0x11}

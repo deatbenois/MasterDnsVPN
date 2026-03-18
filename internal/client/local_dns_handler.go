@@ -95,6 +95,10 @@ func (c *Client) resolveDNSQueryPacket(query []byte) []byte {
 
 	defer c.dnsInflight.Resolve(dispatch.CacheKey)
 
+	if c.stream0Runtime != nil && c.stream0Runtime.IsRunning() {
+		c.stream0Runtime.NotifyDNSActivity()
+	}
+
 	tunnelResponse, err := c.dispatchDNSQuery(dispatch)
 	if err == nil && len(tunnelResponse) != 0 {
 		return tunnelResponse

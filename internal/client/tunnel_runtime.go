@@ -14,6 +14,7 @@ import (
 	"strconv"
 	"time"
 
+	"masterdnsvpn-go/internal/arq"
 	DnsParser "masterdnsvpn-go/internal/dnsparser"
 	Enums "masterdnsvpn-go/internal/enums"
 	VpnProto "masterdnsvpn-go/internal/vpnproto"
@@ -30,7 +31,13 @@ func (c *Client) dispatchDNSQuery(request *dnsDispatchRequest) (response []byte,
 		return nil, ErrSessionInitFailed
 	}
 
-	packet, err := c.exchangeMainStreamPacket(Enums.PACKET_DNS_QUERY_REQ, request.Query)
+	var packet VpnProto.Packet
+	if c.stream0Runtime != nil && c.stream0Runtime.IsRunning() {
+		timeout := time.Duration(c.cfg.LocalDNSPendingTimeoutSec * float64(time.Second))
+		packet, err = c.stream0Runtime.ExchangeDNSQuery(request.Query, timeout)
+	} else {
+		packet, err = c.exchangeMainStreamPacket(Enums.PACKET_DNS_QUERY_REQ, request.Query)
+	}
 	if err != nil {
 		return nil, err
 	}
@@ -69,9 +76,23 @@ func (c *Client) exchangeMainStreamPacket(packetType uint8, payload []byte) (Vpn
 	}
 
 	sequenceNum := c.nextMainSequence()
+	return c.sendMainStreamPacket(packetType, sequenceNum, payload, connections, timeout)
+}
+
+func (c *Client) sendMainStreamPacket(packetType uint8, sequenceNum uint16, payload []byte, connections []Connection, timeout time.Duration) (VpnProto.Packet, error) {
+	if c == nil {
+		return VpnProto.Packet{}, ErrTunnelDNSDispatchFailed
+	}
+	if len(connections) == 0 {
+		connections = c.GetUniqueConnections(3)
+	}
+	if len(connections) == 0 {
+		return VpnProto.Packet{}, ErrNoValidConnections
+	}
+
 	lastErr := ErrTunnelDNSDispatchFailed
 	for _, connection := range connections {
-		packet, err := c.exchangeMainStreamPacketWithConnection(connection, packetType, sequenceNum, payload, timeout)
+		packet, err := c.sendMainStreamPacketWithConnection(connection, packetType, sequenceNum, payload, timeout)
 		if err == nil {
 			return packet, nil
 		}
@@ -82,7 +103,7 @@ func (c *Client) exchangeMainStreamPacket(packetType uint8, payload []byte) (Vpn
 	return VpnProto.Packet{}, lastErr
 }
 
-func (c *Client) exchangeMainStreamPacketWithConnection(connection Connection, packetType uint8, sequenceNum uint16, payload []byte, timeout time.Duration) (VpnProto.Packet, error) {
+func (c *Client) sendMainStreamPacketWithConnection(connection Connection, packetType uint8, sequenceNum uint16, payload []byte, timeout time.Duration) (VpnProto.Packet, error) {
 	fragments, err := c.fragmentMainStreamPayload(connection.Domain, packetType, payload)
 	if err != nil {
 		return VpnProto.Packet{}, err
@@ -121,6 +142,31 @@ func (c *Client) exchangeMainStreamPacketWithConnection(connection Connection, p
 	return VpnProto.Packet{}, ErrTunnelDNSDispatchFailed
 }
 
+func (c *Client) sendStream0Packet(packet arq.QueuedPacket) (VpnProto.Packet, error) {
+	if c == nil {
+		return VpnProto.Packet{}, ErrTunnelDNSDispatchFailed
+	}
+
+	timeout := time.Duration(c.cfg.LocalDNSPendingTimeoutSec * float64(time.Second))
+	if timeout <= 0 {
+		timeout = 5 * time.Second
+	}
+
+	connections := c.GetUniqueConnections(3)
+	if len(connections) == 0 {
+		return VpnProto.Packet{}, ErrNoValidConnections
+	}
+
+	switch packet.PacketType {
+	case Enums.PACKET_DNS_QUERY_REQ:
+		return c.sendMainStreamPacket(packet.PacketType, packet.SequenceNum, packet.Payload, connections, timeout)
+	case Enums.PACKET_PING:
+		return c.sendSessionControlPacket(packet.PacketType, packet.Payload, connections, timeout)
+	default:
+		return VpnProto.Packet{}, ErrTunnelDNSDispatchFailed
+	}
+}
+
 func (c *Client) buildMainStreamQuery(domain string, packetType uint8, sequenceNum uint16, fragmentID uint8, totalFragments uint8, payload []byte) ([]byte, error) {
 	encoded, err := VpnProto.BuildEncodedAuto(VpnProto.BuildOptions{
 		SessionID:       c.sessionID,
@@ -132,6 +178,24 @@ func (c *Client) buildMainStreamQuery(domain string, packetType uint8, sequenceN
 		TotalFragments:  totalFragments,
 		CompressionType: c.uploadCompression,
 		Payload:         payload,
+	}, c.codec, c.cfg.CompressionMinSize)
+	if err != nil {
+		return nil, err
+	}
+
+	name, err := DnsParser.BuildTunnelQuestionName(domain, encoded)
+	if err != nil {
+		return nil, err
+	}
+	return DnsParser.BuildTXTQuestionPacket(name, Enums.DNS_RECORD_TYPE_TXT, EDnsSafeUDPSize)
+}
+
+func (c *Client) buildSessionControlQuery(domain string, packetType uint8, payload []byte) ([]byte, error) {
+	encoded, err := VpnProto.BuildEncodedAuto(VpnProto.BuildOptions{
+		SessionID:     c.sessionID,
+		PacketType:    packetType,
+		SessionCookie: c.sessionCookie,
+		Payload:       payload,
 	}, c.codec, c.cfg.CompressionMinSize)
 	if err != nil {
 		return nil, err
@@ -286,4 +350,42 @@ func exchangeUDPQuery(transport *udpQueryTransport, packet []byte, timeout time.
 		return nil, err
 	}
 	return append([]byte(nil), transport.buffer[:n]...), nil
+}
+
+func (c *Client) sendSessionControlPacket(packetType uint8, payload []byte, connections []Connection, timeout time.Duration) (VpnProto.Packet, error) {
+	if c == nil {
+		return VpnProto.Packet{}, ErrTunnelDNSDispatchFailed
+	}
+	if len(connections) == 0 {
+		connections = c.GetUniqueConnections(3)
+	}
+	if len(connections) == 0 {
+		return VpnProto.Packet{}, ErrNoValidConnections
+	}
+
+	lastErr := ErrTunnelDNSDispatchFailed
+	for _, connection := range connections {
+		query, err := c.buildSessionControlQuery(connection.Domain, packetType, payload)
+		if err != nil {
+			lastErr = err
+			continue
+		}
+
+		response, err := c.exchangeDNSOverConnection(connection, query, timeout)
+		if err != nil {
+			c.SetConnectionValidity(connection.Key, false)
+			lastErr = err
+			continue
+		}
+
+		packet, err := DnsParser.ExtractVPNResponse(response, c.responseMode == mtuProbeBase64Reply)
+		if err != nil || !c.validateServerPacket(packet) {
+			c.SetConnectionValidity(connection.Key, false)
+			lastErr = ErrTunnelDNSDispatchFailed
+			continue
+		}
+		return packet, nil
+	}
+
+	return VpnProto.Packet{}, lastErr
 }

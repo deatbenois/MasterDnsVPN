@@ -129,6 +129,13 @@ func (s *Scheduler) Pending() int {
 	return s.totalQueued
 }
 
+func (s *Scheduler) PendingPings() int {
+	if s == nil {
+		return 0
+	}
+	return s.pingQueued
+}
+
 func (s *Scheduler) Enqueue(target QueueTarget, packet QueuedPacket) bool {
 	if s == nil || isDropQueuePacket(packet.PacketType) {
 		return false
