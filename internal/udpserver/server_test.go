@@ -484,6 +484,34 @@ func TestSessionStoreTouchRefreshesActivity(t *testing.T) {
 	}
 }
 
+func TestSessionStoreValidateAndTouchRefreshesActivity(t *testing.T) {
+	store := newSessionStore()
+	payload := []byte{1, 0x21, 0x00, 0x96, 0x00, 0xC8, 0x44, 0x33, 0x22, 0x11}
+
+	record, _, err := store.findOrCreate(payload, 0, 0)
+	if err != nil {
+		t.Fatalf("findOrCreate returned error: %v", err)
+	}
+
+	old := record.LastActivityAt
+	time.Sleep(5 * time.Millisecond)
+	result := store.ValidateAndTouch(record.ID, record.Cookie, time.Now())
+	if !result.Known || !result.Valid {
+		t.Fatalf("expected valid active session result, got=%+v", result)
+	}
+	if result.Lookup.State != sessionLookupActive {
+		t.Fatalf("unexpected lookup state: got=%v want=%v", result.Lookup.State, sessionLookupActive)
+	}
+
+	active, ok := store.Active(record.ID)
+	if !ok {
+		t.Fatal("Active returned false")
+	}
+	if !active.LastActivityAt.After(old) {
+		t.Fatal("ValidateAndTouch should refresh last activity timestamp")
+	}
+}
+
 func TestHandlePacketReturnsInvalidSessionErrorForRecentlyClosedCookieThreshold(t *testing.T) {
 	codec, err := security.NewCodec(0, "")
 	if err != nil {

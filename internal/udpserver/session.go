@@ -62,6 +62,12 @@ type sessionLookupResult struct {
 	State        sessionLookupState
 }
 
+type sessionValidationResult struct {
+	Lookup sessionLookupResult
+	Known  bool
+	Valid  bool
+}
+
 type sessionStore struct {
 	mu           sync.Mutex
 	nextID       uint16
@@ -196,6 +202,41 @@ func (s *sessionStore) ValidateCookie(sessionID uint8, cookie uint8) bool {
 
 	record := s.byID[sessionID]
 	return record != nil && record.Cookie == cookie
+}
+
+func (s *sessionStore) ValidateAndTouch(sessionID uint8, cookie uint8, now time.Time) sessionValidationResult {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if record := s.byID[sessionID]; record != nil {
+		result := sessionValidationResult{
+			Lookup: sessionLookupResult{
+				Cookie:       record.Cookie,
+				ResponseMode: record.ResponseMode,
+				State:        sessionLookupActive,
+			},
+			Known: true,
+			Valid: record.Cookie == cookie,
+		}
+		if result.Valid {
+			record.LastActivityAt = now
+		}
+		return result
+	}
+
+	if record, ok := s.recentClosed[sessionID]; ok {
+		return sessionValidationResult{
+			Lookup: sessionLookupResult{
+				Cookie:       record.Cookie,
+				ResponseMode: record.ResponseMode,
+				State:        sessionLookupClosed,
+			},
+			Known: true,
+			Valid: false,
+		}
+	}
+
+	return sessionValidationResult{}
 }
 
 func (s *sessionStore) Close(sessionID uint8, now time.Time, retention time.Duration) bool {

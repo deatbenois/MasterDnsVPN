@@ -51,7 +51,7 @@ func (c *Client) RunInitialMTUTests() error {
 	workerCount := min(max(1, c.cfg.MTUTestParallelism), len(c.connections))
 	if workerCount <= 1 {
 		for idx := range c.connections {
-			c.runConnectionMTUTest(&c.connections[idx], uploadCaps[c.connections[idx].Domain])
+			c.safeRunConnectionMTUTest(&c.connections[idx], uploadCaps[c.connections[idx].Domain])
 		}
 	} else {
 		jobs := make(chan int, len(c.connections))
@@ -62,7 +62,7 @@ func (c *Client) RunInitialMTUTests() error {
 				defer wg.Done()
 				for idx := range jobs {
 					conn := &c.connections[idx]
-					c.runConnectionMTUTest(conn, uploadCaps[conn.Domain])
+					c.safeRunConnectionMTUTest(conn, uploadCaps[conn.Domain])
 				}
 			}()
 		}
@@ -90,6 +90,22 @@ func (c *Client) RunInitialMTUTests() error {
 	c.syncedDownloadMTU = minConnectionMTU(c.connections, false)
 	c.syncedUploadChars = minConnectionUploadChars(c.connections, c)
 	return nil
+}
+
+func (c *Client) safeRunConnectionMTUTest(conn *Connection, maxUploadPayload int) {
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			conn.IsValid = false
+			if c.log != nil {
+				c.log.Errorf(
+					"💥 <red>MTU Probe Worker Panic Recovered</red> <magenta>|</magenta> <blue>Resolver</blue>: <cyan>%s</cyan> <magenta>|</magenta> <yellow>%v</yellow>",
+					conn.ResolverLabel,
+					recovered,
+				)
+			}
+		}
+	}()
+	c.runConnectionMTUTest(conn, maxUploadPayload)
 }
 
 func (c *Client) runConnectionMTUTest(conn *Connection, maxUploadPayload int) {

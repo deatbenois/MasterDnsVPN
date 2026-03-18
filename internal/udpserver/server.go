@@ -223,7 +223,7 @@ func (s *Server) worker(ctx context.Context, conn *net.UDPConn, reqCh <-chan req
 			}
 
 			payload := req.buf[:req.size]
-			response := s.handlePacket(payload)
+			response := s.safeHandlePacket(payload)
 			if len(response) == 0 {
 				s.packetPool.Put(req.buf)
 				continue
@@ -245,6 +245,21 @@ func (s *Server) worker(ctx context.Context, conn *net.UDPConn, reqCh <-chan req
 	}
 }
 
+func (s *Server) safeHandlePacket(packet []byte) (response []byte) {
+	defer func() {
+		if recovered := recover(); recovered != nil {
+			if s.log != nil {
+				s.log.Errorf(
+					"💥 <red>Packet Handler Panic Recovered</red> <magenta>|</magenta> <yellow>%v</yellow>",
+					recovered,
+				)
+			}
+			response = nil
+		}
+	}()
+	return s.handlePacket(packet)
+}
+
 func (s *Server) handlePacket(packet []byte) []byte {
 	if !DnsParser.LooksLikeDNSRequest(packet) {
 		return nil
@@ -252,19 +267,11 @@ func (s *Server) handlePacket(packet []byte) []byte {
 
 	parsed, err := DnsParser.ParsePacketLite(packet)
 	if err != nil {
-		response, responseErr := DnsParser.BuildFormatErrorResponse(packet)
-		if responseErr == nil {
-			return response
-		}
-		return nil
+		return buildFormatErrorResponse(packet)
 	}
 
 	if !parsed.HasQuestion {
-		response, responseErr := DnsParser.BuildFormatErrorResponse(packet)
-		if responseErr == nil {
-			return response
-		}
-		return nil
+		return buildFormatErrorResponse(packet)
 	}
 
 	decision := s.domainMatcher.Match(parsed)
@@ -272,17 +279,9 @@ func (s *Server) handlePacket(packet []byte) []byte {
 	case domainmatcher.ActionProcess:
 		return s.handleTunnelCandidate(packet, parsed, decision)
 	case domainmatcher.ActionFormatError:
-		response, responseErr := DnsParser.BuildFormatErrorResponseFromLite(packet, parsed)
-		if responseErr == nil {
-			return response
-		}
-		return nil
+		return buildFormatErrorResponseLite(packet, parsed)
 	case domainmatcher.ActionNoData:
-		response, responseErr := DnsParser.BuildEmptyNoErrorResponseFromLite(packet, parsed)
-		if responseErr == nil {
-			return response
-		}
-		return nil
+		return buildNoDataResponseLite(packet, parsed)
 	default:
 		return nil
 	}
@@ -291,23 +290,18 @@ func (s *Server) handlePacket(packet []byte) []byte {
 func (s *Server) handleTunnelCandidate(packet []byte, parsed DnsParser.LitePacket, decision domainmatcher.Decision) []byte {
 	vpnPacket, err := VpnProto.ParseFromLabels(decision.Labels, s.codec)
 	if err != nil {
-		response, responseErr := DnsParser.BuildEmptyNoErrorResponseFromLite(packet, parsed)
-		if responseErr != nil {
-			return nil
-		}
-		return response
+		return buildNoDataResponseLite(packet, parsed)
 	}
 	vpnPacket, err = VpnProto.InflatePayload(vpnPacket)
 	if err != nil {
-		response, responseErr := DnsParser.BuildEmptyNoErrorResponseFromLite(packet, parsed)
-		if responseErr != nil {
-			return nil
-		}
-		return response
+		return buildNoDataResponseLite(packet, parsed)
 	}
 	if !isPreSessionRequestType(vpnPacket.PacketType) {
-		lookup, hasExpectedCookie := s.sessions.Lookup(vpnPacket.SessionID)
-		if !s.sessions.ValidateCookie(vpnPacket.SessionID, vpnPacket.SessionCookie) {
+		now := time.Now()
+		validation := s.sessions.ValidateAndTouch(vpnPacket.SessionID, vpnPacket.SessionCookie, now)
+		lookup := validation.Lookup
+		hasExpectedCookie := validation.Known
+		if !validation.Valid {
 			var expectedCookiePtr *uint8
 			if hasExpectedCookie {
 				expectedCookiePtr = &lookup.Cookie
@@ -317,7 +311,7 @@ func (s *Server) handleTunnelCandidate(packet []byte, parsed DnsParser.LitePacke
 				expectedCookiePtr,
 				vpnPacket.SessionCookie,
 				lookup.State,
-				time.Now(),
+				now,
 				s.cfg.InvalidCookieWindow(),
 				s.cfg.InvalidCookieErrorThreshold,
 			)
@@ -351,7 +345,6 @@ func (s *Server) handleTunnelCandidate(packet []byte, parsed DnsParser.LitePacke
 			}
 			return nil
 		}
-		s.sessions.Touch(vpnPacket.SessionID, time.Now())
 	}
 
 	switch vpnPacket.PacketType {
@@ -362,12 +355,32 @@ func (s *Server) handleTunnelCandidate(packet []byte, parsed DnsParser.LitePacke
 	case Enums.PACKET_MTU_DOWN_REQ:
 		return s.handleMTUDownRequest(packet, parsed, decision, vpnPacket)
 	default:
-		response, responseErr := DnsParser.BuildEmptyNoErrorResponseFromLite(packet, parsed)
-		if responseErr != nil {
-			return nil
-		}
-		return response
+		return buildNoDataResponseLite(packet, parsed)
 	}
+}
+
+func buildFormatErrorResponse(packet []byte) []byte {
+	response, err := DnsParser.BuildFormatErrorResponse(packet)
+	if err != nil {
+		return nil
+	}
+	return response
+}
+
+func buildFormatErrorResponseLite(packet []byte, parsed DnsParser.LitePacket) []byte {
+	response, err := DnsParser.BuildFormatErrorResponseFromLite(packet, parsed)
+	if err != nil {
+		return nil
+	}
+	return response
+}
+
+func buildNoDataResponseLite(packet []byte, parsed DnsParser.LitePacket) []byte {
+	response, err := DnsParser.BuildEmptyNoErrorResponseFromLite(packet, parsed)
+	if err != nil {
+		return nil
+	}
+	return response
 }
 
 func (s *Server) buildInvalidSessionErrorResponse(questionPacket []byte, requestName string, sessionID uint8, responseMode uint8) []byte {
