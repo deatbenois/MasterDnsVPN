@@ -21,14 +21,14 @@ import (
 
 	"masterdnsvpn-go/internal/compression"
 	"masterdnsvpn-go/internal/config"
-	"masterdnsvpn-go/internal/dnscache"
+	dnsCache "masterdnsvpn-go/internal/dnscache"
 	DnsParser "masterdnsvpn-go/internal/dnsparser"
-	"masterdnsvpn-go/internal/domainmatcher"
+	domainMatcher "masterdnsvpn-go/internal/domainmatcher"
 	Enums "masterdnsvpn-go/internal/enums"
 	"masterdnsvpn-go/internal/logger"
 	"masterdnsvpn-go/internal/security"
 	SocksProto "masterdnsvpn-go/internal/socksproto"
-	"masterdnsvpn-go/internal/streamutil"
+	streamUtil "masterdnsvpn-go/internal/streamutil"
 	VpnProto "masterdnsvpn-go/internal/vpnproto"
 )
 
@@ -44,12 +44,12 @@ type Server struct {
 	cfg                     config.ServerConfig
 	log                     *logger.Logger
 	codec                   *security.Codec
-	domainMatcher           *domainmatcher.Matcher
+	domainMatcher           *domainMatcher.Matcher
 	sessions                *sessionStore
 	streams                 *streamStateStore
 	streamOutbound          *streamOutboundStore
 	invalidCookieTracker    *invalidCookieTracker
-	dnsCache                *dnscache.Store
+	dnsCache                *dnsCache.Store
 	dnsResolveInflight      *dnsResolveInflightManager
 	dnsUpstreamServers      []string
 	dnsUpstreamBufferPool   sync.Pool
@@ -75,12 +75,12 @@ func New(cfg config.ServerConfig, log *logger.Logger, codec *security.Codec) *Se
 		cfg:                  cfg,
 		log:                  log,
 		codec:                codec,
-		domainMatcher:        domainmatcher.New(cfg.Domain, cfg.MinVPNLabelLength),
+		domainMatcher:        domainMatcher.New(cfg.Domain, cfg.MinVPNLabelLength),
 		sessions:             newSessionStore(),
 		streams:              newStreamStateStore(),
 		streamOutbound:       newStreamOutboundStore(cfg.StreamOutboundWindow, cfg.StreamOutboundQueueLimit),
 		invalidCookieTracker: newInvalidCookieTracker(),
-		dnsCache: dnscache.New(
+		dnsCache: dnsCache.New(
 			cfg.DNSCacheMaxRecords,
 			time.Duration(cfg.DNSCacheTTLSeconds*float64(time.Second)),
 			cfg.DNSFragmentAssemblyTimeout(),
@@ -114,20 +114,23 @@ func (s *Server) Run(ctx context.Context) error {
 		IP:   net.ParseIP(s.cfg.UDPHost),
 		Port: s.cfg.UDPPort,
 	})
+
 	if err != nil {
 		return err
 	}
+
 	defer conn.Close()
 
 	if err := conn.SetReadBuffer(s.cfg.SocketBufferSize); err != nil {
-		s.log.Warnf("⚠️ <yellow>UDP Read Buffer Setup Failed</yellow> <magenta>|</magenta> <cyan>%v</cyan>", err)
+		s.log.Warnf("⚠️ <yellow>UDP Read Buffer Setup Failed, <cyan>%v</cyan></yellow>", err)
 	}
+
 	if err := conn.SetWriteBuffer(s.cfg.SocketBufferSize); err != nil {
-		s.log.Warnf("⚠️ <yellow>UDP Write Buffer Setup Failed</yellow> <magenta>|</magenta> <cyan>%v</cyan>", err)
+		s.log.Warnf("⚠️ <yellow>UDP Write Buffer Setup Failed, <cyan>%v</cyan></yellow>", err)
 	}
 
 	s.log.Infof(
-		"🛰️ <green>UDP Listener Ready</green> <magenta>|</magenta> <blue>Addr</blue>: <cyan>%s</cyan> <magenta>|</magenta> <blue>Readers</blue>: <magenta>%d</magenta> <magenta>|</magenta> <blue>Workers</blue>: <magenta>%d</magenta> <magenta>|</magenta> <blue>Queue</blue>: <magenta>%d</magenta>",
+		"🛰️ <green>UDP Listener Ready, Addr: <cyan>%s</cyan>, Readers: <cyan>%d</cyan>, Workers: <cyan>%d</cyan>, Queue: <cyan>%d</cyan></green>",
 		s.cfg.Address(),
 		s.cfg.UDPReaders,
 		s.cfg.DNSRequestWorkers,
@@ -194,6 +197,9 @@ func (s *Server) sessionCleanupLoop(ctx context.Context) {
 	if interval <= 0 {
 		interval = 30 * time.Second
 	}
+	sessionTimeout := s.cfg.SessionTimeout()
+	closedRetention := s.cfg.ClosedSessionRetention()
+	invalidCookieWindow := s.cfg.InvalidCookieWindow()
 
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
@@ -203,8 +209,8 @@ func (s *Server) sessionCleanupLoop(ctx context.Context) {
 		case <-ctx.Done():
 			return
 		case now := <-ticker.C:
-			expired := s.sessions.Cleanup(now, s.cfg.SessionTimeout(), s.cfg.ClosedSessionRetention())
-			s.invalidCookieTracker.Cleanup(now, s.cfg.InvalidCookieWindow())
+			expired := s.sessions.Cleanup(now, sessionTimeout, closedRetention)
+			s.invalidCookieTracker.Cleanup(now, invalidCookieWindow)
 			s.purgeDNSQueryFragments(now)
 			if len(expired) == 0 {
 				continue
@@ -214,7 +220,7 @@ func (s *Server) sessionCleanupLoop(ctx context.Context) {
 				s.streamOutbound.RemoveSession(sessionID)
 			}
 			s.log.Infof(
-				"🧹 <green>Expired Sessions Cleaned</green> <magenta>|</magenta> <blue>Count</blue>: <cyan>%d</cyan>",
+				"🧹 <green>Expired Sessions Cleaned, Count: <cyan>%d</cyan></green>",
 				len(expired),
 			)
 		}
@@ -314,18 +320,18 @@ func (s *Server) handlePacket(packet []byte) []byte {
 
 	decision := s.domainMatcher.Match(parsed)
 	switch decision.Action {
-	case domainmatcher.ActionProcess:
+	case domainMatcher.ActionProcess:
 		return s.handleTunnelCandidate(packet, parsed, decision)
-	case domainmatcher.ActionFormatError:
+	case domainMatcher.ActionFormatError:
 		return buildFormatErrorResponseLite(packet, parsed)
-	case domainmatcher.ActionNoData:
+	case domainMatcher.ActionNoData:
 		return buildNoDataResponseLite(packet, parsed)
 	default:
 		return nil
 	}
 }
 
-func (s *Server) handleTunnelCandidate(packet []byte, parsed DnsParser.LitePacket, decision domainmatcher.Decision) []byte {
+func (s *Server) handleTunnelCandidate(packet []byte, parsed DnsParser.LitePacket, decision domainMatcher.Decision) []byte {
 	vpnPacket, err := VpnProto.ParseFromLabels(decision.Labels, s.codec)
 	if err != nil {
 		return buildNoDataResponseLite(packet, parsed)
@@ -477,7 +483,7 @@ func isPreSessionRequestType(packetType uint8) bool {
 	}
 }
 
-func (s *Server) handleSessionInitRequest(questionPacket []byte, decision domainmatcher.Decision, vpnPacket VpnProto.Packet) []byte {
+func (s *Server) handleSessionInitRequest(questionPacket []byte, decision domainMatcher.Decision, vpnPacket VpnProto.Packet) []byte {
 	if vpnPacket.SessionID != 0 || len(vpnPacket.Payload) != sessionInitDataSize {
 		return nil
 	}
@@ -554,7 +560,7 @@ func (s *Server) onDrop(addr *net.UDPAddr) {
 	)
 }
 
-func (s *Server) handleMTUUpRequest(questionPacket []byte, _ DnsParser.LitePacket, decision domainmatcher.Decision, vpnPacket VpnProto.Packet) []byte {
+func (s *Server) handleMTUUpRequest(questionPacket []byte, _ DnsParser.LitePacket, decision domainMatcher.Decision, vpnPacket VpnProto.Packet) []byte {
 	if len(vpnPacket.Payload) < 1+mtuProbeCodeLength {
 		return nil
 	}
@@ -578,7 +584,7 @@ func (s *Server) handleMTUUpRequest(questionPacket []byte, _ DnsParser.LitePacke
 	return response
 }
 
-func (s *Server) handleMTUDownRequest(questionPacket []byte, _ DnsParser.LitePacket, decision domainmatcher.Decision, vpnPacket VpnProto.Packet) []byte {
+func (s *Server) handleMTUDownRequest(questionPacket []byte, _ DnsParser.LitePacket, decision domainMatcher.Decision, vpnPacket VpnProto.Packet) []byte {
 	if len(vpnPacket.Payload) < 1+mtuProbeCodeLength+2 {
 		return nil
 	}
@@ -617,7 +623,7 @@ func (s *Server) handleMTUDownRequest(questionPacket []byte, _ DnsParser.LitePac
 	return response
 }
 
-func (s *Server) handlePingRequest(questionPacket []byte, decision domainmatcher.Decision, vpnPacket VpnProto.Packet) []byte {
+func (s *Server) handlePingRequest(questionPacket []byte, decision domainMatcher.Decision, vpnPacket VpnProto.Packet) []byte {
 	sessionRecord, ok := s.sessions.Active(vpnPacket.SessionID)
 	if !ok {
 		return nil
@@ -641,7 +647,7 @@ func (s *Server) handlePingRequest(questionPacket []byte, decision domainmatcher
 	})
 }
 
-func (s *Server) handleDNSQueryRequest(questionPacket []byte, parsed DnsParser.LitePacket, decision domainmatcher.Decision, vpnPacket VpnProto.Packet) []byte {
+func (s *Server) handleDNSQueryRequest(questionPacket []byte, parsed DnsParser.LitePacket, decision domainMatcher.Decision, vpnPacket VpnProto.Packet) []byte {
 	sessionRecord, ok := s.sessions.Active(vpnPacket.SessionID)
 	if !ok {
 		return nil
@@ -700,7 +706,7 @@ func (s *Server) handleDNSQueryRequest(questionPacket []byte, parsed DnsParser.L
 	})
 }
 
-func (s *Server) handleStreamSynRequest(questionPacket []byte, decision domainmatcher.Decision, vpnPacket VpnProto.Packet) []byte {
+func (s *Server) handleStreamSynRequest(questionPacket []byte, decision domainMatcher.Decision, vpnPacket VpnProto.Packet) []byte {
 	if !vpnPacket.HasStreamID || vpnPacket.StreamID == 0 || !vpnPacket.HasSequenceNum {
 		return nil
 	}
@@ -737,7 +743,7 @@ func (s *Server) handleStreamSynRequest(questionPacket []byte, decision domainma
 		}
 		record, ok := s.streams.AttachUpstream(vpnPacket.SessionID, vpnPacket.StreamID, s.cfg.ForwardIP, uint16(s.cfg.ForwardPort), upstreamConn, now)
 		if !ok || record == nil {
-			streamutil.SafeClose(upstreamConn)
+			streamUtil.SafeClose(upstreamConn)
 			return s.buildSessionVPNResponse(questionPacket, decision.RequestName, sessionRecord, VpnProto.Packet{
 				PacketType:  Enums.PACKET_STREAM_RST,
 				StreamID:    vpnPacket.StreamID,
@@ -757,7 +763,7 @@ func (s *Server) handleStreamSynRequest(questionPacket []byte, decision domainma
 	})
 }
 
-func (s *Server) handleSOCKS5SynRequest(questionPacket []byte, decision domainmatcher.Decision, vpnPacket VpnProto.Packet) []byte {
+func (s *Server) handleSOCKS5SynRequest(questionPacket []byte, decision domainMatcher.Decision, vpnPacket VpnProto.Packet) []byte {
 	if !vpnPacket.HasStreamID || vpnPacket.StreamID == 0 || !vpnPacket.HasSequenceNum {
 		return nil
 	}
@@ -826,7 +832,7 @@ func (s *Server) handleSOCKS5SynRequest(questionPacket []byte, decision domainma
 
 	record, ok := s.streams.AttachUpstream(vpnPacket.SessionID, vpnPacket.StreamID, target.Host, target.Port, upstreamConn, now)
 	if !ok || record == nil {
-		streamutil.SafeClose(upstreamConn)
+		streamUtil.SafeClose(upstreamConn)
 		return s.buildSessionVPNResponse(questionPacket, decision.RequestName, sessionRecord, VpnProto.Packet{
 			PacketType:  Enums.PACKET_SOCKS5_UPSTREAM_UNAVAILABLE,
 			StreamID:    vpnPacket.StreamID,
@@ -900,7 +906,7 @@ func (s *Server) mapSOCKSConnectError(err error) uint8 {
 	}
 }
 
-func (s *Server) handleStreamDataRequest(questionPacket []byte, decision domainmatcher.Decision, vpnPacket VpnProto.Packet) []byte {
+func (s *Server) handleStreamDataRequest(questionPacket []byte, decision domainMatcher.Decision, vpnPacket VpnProto.Packet) []byte {
 	if !vpnPacket.HasStreamID || vpnPacket.StreamID == 0 || !vpnPacket.HasSequenceNum {
 		return nil
 	}
@@ -964,7 +970,7 @@ func (s *Server) handleStreamDataRequest(questionPacket []byte, decision domainm
 	}
 }
 
-func (s *Server) handleStreamFinRequest(questionPacket []byte, decision domainmatcher.Decision, vpnPacket VpnProto.Packet) []byte {
+func (s *Server) handleStreamFinRequest(questionPacket []byte, decision domainMatcher.Decision, vpnPacket VpnProto.Packet) []byte {
 	if !vpnPacket.HasStreamID || vpnPacket.StreamID == 0 || !vpnPacket.HasSequenceNum {
 		return nil
 	}
@@ -994,7 +1000,7 @@ func (s *Server) handleStreamFinRequest(questionPacket []byte, decision domainma
 	})
 }
 
-func (s *Server) handleStreamRSTRequest(questionPacket []byte, decision domainmatcher.Decision, vpnPacket VpnProto.Packet) []byte {
+func (s *Server) handleStreamRSTRequest(questionPacket []byte, decision domainMatcher.Decision, vpnPacket VpnProto.Packet) []byte {
 	if !vpnPacket.HasStreamID || vpnPacket.StreamID == 0 || !vpnPacket.HasSequenceNum {
 		return nil
 	}
@@ -1011,7 +1017,7 @@ func (s *Server) handleStreamRSTRequest(questionPacket []byte, decision domainma
 	})
 }
 
-func (s *Server) handleStreamAckPacket(questionPacket []byte, decision domainmatcher.Decision, vpnPacket VpnProto.Packet) []byte {
+func (s *Server) handleStreamAckPacket(questionPacket []byte, decision domainMatcher.Decision, vpnPacket VpnProto.Packet) []byte {
 	if !vpnPacket.HasStreamID || vpnPacket.StreamID == 0 || !vpnPacket.HasSequenceNum {
 		return nil
 	}

@@ -30,29 +30,18 @@ const (
 )
 
 var colorTagCodes = map[string]string{
-	"<black>":    "\x1b[30m",
-	"<red>":      "\x1b[31m",
-	"<green>":    "\x1b[32m",
-	"<yellow>":   "\x1b[33m",
-	"<blue>":     "\x1b[34m",
-	"<magenta>":  "\x1b[35m",
-	"<cyan>":     "\x1b[36m",
-	"<white>":    "\x1b[37m",
-	"<gray>":     "\x1b[90m",
-	"<grey>":     "\x1b[90m",
-	"<bold>":     "\x1b[1m",
-	"<reset>":    "\x1b[0m",
-	"</black>":   "\x1b[0m",
-	"</red>":     "\x1b[0m",
-	"</green>":   "\x1b[0m",
-	"</yellow>":  "\x1b[0m",
-	"</blue>":    "\x1b[0m",
-	"</magenta>": "\x1b[0m",
-	"</cyan>":    "\x1b[0m",
-	"</white>":   "\x1b[0m",
-	"</gray>":    "\x1b[0m",
-	"</grey>":    "\x1b[0m",
-	"</bold>":    "\x1b[0m",
+	"black":   "\x1b[30m",
+	"red":     "\x1b[31m",
+	"green":   "\x1b[32m",
+	"yellow":  "\x1b[33m",
+	"blue":    "\x1b[34m",
+	"magenta": "\x1b[35m",
+	"cyan":    "\x1b[36m",
+	"white":   "\x1b[37m",
+	"gray":    "\x1b[90m",
+	"grey":    "\x1b[90m",
+	"bold":    "\x1b[1m",
+	"reset":   "\x1b[0m",
 }
 
 func New(name, rawLevel string) *Logger {
@@ -81,10 +70,12 @@ func (l *Logger) logf(level int, levelName string, format string, args ...any) {
 	if l == nil || level < l.level {
 		return
 	}
+
 	msg := format
 	if len(args) != 0 {
 		msg = fmt.Sprintf(format, args...)
 	}
+
 	appName := "[" + l.name + "]"
 	levelText := "[" + levelName + "]"
 
@@ -142,6 +133,7 @@ func renderColorTags(text string) string {
 	var b strings.Builder
 	b.Grow(len(text) + 16)
 	b.WriteString(text[:start])
+	stack := make([]string, 0, 4)
 
 	for i := start; i < len(text); {
 		if text[i] != '<' {
@@ -161,16 +153,68 @@ func renderColorTags(text string) string {
 			break
 		}
 
-		tag := strings.ToLower(text[i : i+end+1])
-		if code, ok := colorTagCodes[tag]; ok {
-			b.WriteString(code)
+		rawTag := text[i : i+end+1]
+		tag := strings.ToLower(rawTag)
+		if name, closing, ok := parseColorTag(tag); ok {
+			if closing {
+				if name == "reset" {
+					stack = stack[:0]
+					b.WriteString("\x1b[0m")
+				} else if restoreColorTag(&stack, name) {
+					b.WriteString("\x1b[0m")
+					for _, active := range stack {
+						b.WriteString(colorTagCodes[active])
+					}
+				} else {
+					b.WriteString(rawTag)
+				}
+			} else {
+				stack = append(stack, name)
+				b.WriteString(colorTagCodes[name])
+			}
 		} else {
-			b.WriteString(text[i : i+end+1])
+			b.WriteString(rawTag)
 		}
 		i += end + 1
 	}
 
+	if len(stack) != 0 {
+		b.WriteString("\x1b[0m")
+	}
+
 	return b.String()
+}
+
+func parseColorTag(tag string) (name string, closing bool, ok bool) {
+	if len(tag) < 3 || tag[0] != '<' || tag[len(tag)-1] != '>' {
+		return "", false, false
+	}
+	closing = strings.HasPrefix(tag, "</")
+	if closing {
+		name = tag[2 : len(tag)-1]
+	} else {
+		name = tag[1 : len(tag)-1]
+	}
+	_, ok = colorTagCodes[name]
+	return name, closing, ok
+}
+
+func restoreColorTag(stack *[]string, name string) bool {
+	if stack == nil || len(*stack) == 0 {
+		return false
+	}
+	items := *stack
+	for idx := len(items) - 1; idx >= 0; idx-- {
+		if items[idx] != name {
+			continue
+		}
+		copy(items[idx:], items[idx+1:])
+		lastIdx := len(items) - 1
+		items[lastIdx] = ""
+		*stack = items[:lastIdx]
+		return true
+	}
+	return false
 }
 
 func NowUnixNano() int64 {

@@ -29,15 +29,21 @@ func main() {
 	}
 
 	log := logger.New("MasterDnsVPN Server", cfg.LogLevel)
+	log.Infof("🚀 <magenta>MasterDnsVPN Server starting ...</magenta>")
+
 	keyInfo, err := security.EnsureServerEncryptionKey(cfg)
 	if err != nil {
 		log.Errorf("❌ <red>Encryption Key Setup Failed</red> <magenta>|</magenta> <cyan>%v</cyan>", err)
+		fmt.Print("Press Enter to exit...")
+		_, _ = fmt.Scanln()
 		os.Exit(1)
 	}
 
 	codec, err := security.NewCodecFromConfig(cfg, keyInfo.Key)
 	if err != nil {
 		log.Errorf("❌ <red>Encryption Codec Setup Failed</red> <magenta>|</magenta> <cyan>%v</cyan>", err)
+		fmt.Print("Press Enter to exit...")
+		_, _ = fmt.Scanln()
 		os.Exit(1)
 	}
 
@@ -47,45 +53,44 @@ func main() {
 	defer stop()
 
 	log.Infof("🚀 <green>Server Configuration Loaded</green>")
-	log.Infof(
-		"🛰️ <green>Listener</green> <magenta>|</magenta> <green>Addr: </green><cyan>%s</cyan> <magenta>|</magenta> <green>Readers:</green> <cyan>%d</cyan> <magenta>|</magenta> <green>Workers:</green> <cyan>%d</cyan>",
-		cfg.Address(),
-		cfg.UDPReaders,
-		cfg.DNSRequestWorkers,
-	)
-
 	if len(cfg.Domain) > 0 {
 		log.Infof(
-			"🌐 <green>Allowed Domains</green> <magenta>|</magenta> <cyan>%s</cyan> <magenta>|</magenta> <green>Min Label:</green> <cyan>%d</cyan>",
+			"🌐 <green>Allowed Domains: <cyan>%s</cyan>, Min Label:<cyan>%d</cyan></green>",
 			strings.Join(cfg.Domain, ", "),
 			cfg.MinVPNLabelLength,
 		)
 	} else {
-		log.Warnf(
-			"⚠️ <yellow>No Allowed Domains Configured</yellow> <magenta>|</magenta> <blue>Fallback</blue>: <green>NODATA</green>",
+		log.Errorf(
+			"⚠️ <yellow>No Allowed Domains Configured!</yellow>",
 		)
+		fmt.Print("Press Enter to exit...")
+		_, _ = fmt.Scanln()
+		os.Exit(1)
 	}
+
 	log.Infof(
-		"🔐 <green>Encryption</green> <magenta>|</magenta> <green>Method:</green> <cyan>%s</cyan> <gray>(id=%d)</gray>",
+		"🔐 <green>Encryption Method: <cyan>%s</cyan> <gray>(id=%d)</gray></green>",
 		keyInfo.MethodName,
 		keyInfo.MethodID,
 	)
+
 	if keyInfo.Generated {
 		log.Warnf(
-			"🗝️ <yellow>Encryption Key Generated</yellow> <magenta>|</magenta> <blue>Path</blue>: <cyan>%s</cyan>",
+			"🗝️ <yellow>Encryption Key Generated, Path: <cyan>%s</cyan></yellow>",
 			keyInfo.Path,
 		)
 	} else {
 		log.Infof(
-			"🗂️ <green>Encryption Key Loaded</green> <magenta>|</magenta> <blue>Path</blue>: <cyan>%s</cyan>",
+			"🗂️ <green>Encryption Key Loaded, Path: <cyan>%s</cyan></green>",
 			keyInfo.Path,
 		)
 	}
-	log.Infof("🔑 <green>Active Encryption Key</green> <magenta>|</magenta> <yellow>%s</yellow>", keyInfo.Key)
-	log.Infof("▶️ <green>Starting UDP Server</green> <magenta>|</magenta> <blue>Addr</blue>: <cyan>%s</cyan>", cfg.Address())
+
+	log.Infof("🔑 <green>Active Encryption Key: <yellow>%s</yellow></green>", keyInfo.Key)
+	log.Debugf("▶️ <green>Starting UDP Server...</green>")
 
 	if err := srv.Run(ctx); err != nil && !errors.Is(err, context.Canceled) {
-		log.Errorf("💥 <red>Server Stopped Unexpectedly</red> <magenta>|</magenta> <cyan>%v</cyan>", err)
+		log.Errorf("💥 <red>Server Stopped Unexpectedly, <cyan>%v</cyan></red>", err)
 		os.Exit(1)
 	}
 

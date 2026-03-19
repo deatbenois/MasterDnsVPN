@@ -48,6 +48,14 @@ func TestRenderColorTags(t *testing.T) {
 	}
 }
 
+func TestRenderColorTagsRestoresParentColor(t *testing.T) {
+	got := renderColorTags("<green>Listener <cyan>127.0.0.1:5350</cyan> Ready</green>")
+	want := "\x1b[32mListener \x1b[36m127.0.0.1:5350\x1b[0m\x1b[32m Ready\x1b[0m"
+	if got != want {
+		t.Fatalf("renderColorTags() = %q, want %q", got, want)
+	}
+}
+
 func TestLoggerSuppressesBelowLevel(t *testing.T) {
 	var buf bytes.Buffer
 	l := &Logger{
