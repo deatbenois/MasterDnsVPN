@@ -16,10 +16,12 @@ import (
 )
 
 type Logger struct {
-	name  string
-	level int
-	base  *log.Logger
-	color bool
+	name           string
+	level          int
+	base           *log.Logger
+	color          bool
+	appNameText    string
+	appNameColored string
 }
 
 const (
@@ -44,12 +46,29 @@ var colorTagCodes = map[string]string{
 	"reset":   "\x1b[0m",
 }
 
+var plainLevelTexts = [...]string{
+	levelDebug: "[DEBUG]",
+	levelInfo:  "[INFO]",
+	levelWarn:  "[WARN]",
+	levelError: "[ERROR]",
+}
+
+var coloredLevelTexts = [...]string{
+	levelDebug: "\x1b[35m[DEBUG]\x1b[0m",
+	levelInfo:  "\x1b[32m[INFO]\x1b[0m",
+	levelWarn:  "\x1b[33m[WARN]\x1b[0m",
+	levelError: "\x1b[31m[ERROR]\x1b[0m",
+}
+
 func New(name, rawLevel string) *Logger {
+	appName := "[" + name + "]"
 	return &Logger{
-		name:  name,
-		level: parseLevel(rawLevel),
-		base:  log.New(os.Stdout, "", log.LstdFlags),
-		color: shouldUseColor(),
+		name:           name,
+		level:          parseLevel(rawLevel),
+		base:           log.New(os.Stdout, "", log.LstdFlags),
+		color:          shouldUseColor(),
+		appNameText:    appName,
+		appNameColored: "\x1b[36m" + appName + "\x1b[0m",
 	}
 }
 
@@ -66,7 +85,7 @@ func parseLevel(raw string) int {
 	}
 }
 
-func (l *Logger) logf(level int, levelName string, format string, args ...any) {
+func (l *Logger) logf(level int, format string, args ...any) {
 	if l == nil || level < l.level {
 		return
 	}
@@ -76,24 +95,24 @@ func (l *Logger) logf(level int, levelName string, format string, args ...any) {
 		msg = fmt.Sprintf(format, args...)
 	}
 
-	appName := "[" + l.name + "]"
-	levelText := "[" + levelName + "]"
+	appName := l.appNameText
+	levelText := plainLevelTexts[level]
 
 	if l.color {
 		if strings.IndexByte(msg, '<') >= 0 {
 			msg = renderColorTags(msg)
 		}
-		appName = "\x1b[36m" + appName + "\x1b[0m"
-		levelText = colorizeLevel(level, levelText)
+		appName = l.appNameColored
+		levelText = coloredLevelTexts[level]
 	}
 
-	l.base.Printf("%s %s %s", appName, levelText, msg)
+	l.base.Print(appName, " ", levelText, " ", msg)
 }
 
-func (l *Logger) Debugf(format string, args ...any) { l.logf(levelDebug, "DEBUG", format, args...) }
-func (l *Logger) Infof(format string, args ...any)  { l.logf(levelInfo, "INFO", format, args...) }
-func (l *Logger) Warnf(format string, args ...any)  { l.logf(levelWarn, "WARN", format, args...) }
-func (l *Logger) Errorf(format string, args ...any) { l.logf(levelError, "ERROR", format, args...) }
+func (l *Logger) Debugf(format string, args ...any) { l.logf(levelDebug, format, args...) }
+func (l *Logger) Infof(format string, args ...any)  { l.logf(levelInfo, format, args...) }
+func (l *Logger) Warnf(format string, args ...any)  { l.logf(levelWarn, format, args...) }
+func (l *Logger) Errorf(format string, args ...any) { l.logf(levelError, format, args...) }
 
 func shouldUseColor() bool {
 	if strings.TrimSpace(os.Getenv("NO_COLOR")) != "" {
@@ -107,21 +126,6 @@ func shouldUseColor() bool {
 		return false
 	}
 	return (info.Mode() & os.ModeCharDevice) != 0
-}
-
-func colorizeLevel(level int, text string) string {
-	switch level {
-	case levelDebug:
-		return "\x1b[35m" + text + "\x1b[0m"
-	case levelInfo:
-		return "\x1b[32m" + text + "\x1b[0m"
-	case levelWarn:
-		return "\x1b[33m" + text + "\x1b[0m"
-	case levelError:
-		return "\x1b[31m" + text + "\x1b[0m"
-	default:
-		return text
-	}
 }
 
 func renderColorTags(text string) string {

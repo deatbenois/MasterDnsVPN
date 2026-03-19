@@ -59,10 +59,11 @@ func TestRenderColorTagsRestoresParentColor(t *testing.T) {
 func TestLoggerSuppressesBelowLevel(t *testing.T) {
 	var buf bytes.Buffer
 	l := &Logger{
-		name:  "test",
-		level: levelWarn,
-		base:  log.New(&buf, "", 0),
-		color: false,
+		name:        "test",
+		level:       levelWarn,
+		base:        log.New(&buf, "", 0),
+		color:       false,
+		appNameText: "[test]",
 	}
 
 	l.Infof("info message")
