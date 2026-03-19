@@ -245,11 +245,13 @@ func (s *Server) readLoop(ctx context.Context, conn *net.UDPConn, reqCh chan<- r
 		n, addr, err := conn.ReadFromUDP(buffer)
 		if err != nil {
 			s.packetPool.Put(buffer)
+
 			if ctx.Err() != nil || errors.Is(err, net.ErrClosed) {
 				return nil
 			}
+
 			s.log.Debugf(
-				"📥 <yellow>UDP Read Error</yellow> <magenta>|</magenta> <blue>Reader</blue>: <cyan>%d</cyan> <magenta>|</magenta> <cyan>%v</cyan>",
+				"📥 <yellow>UDP Read Error, Reader: <cyan>%d</cyan>, Error: <cyan>%v</cyan></yellow>",
 				readerID,
 				err,
 			)
@@ -278,22 +280,16 @@ func (s *Server) worker(ctx context.Context, conn *net.UDPConn, reqCh <-chan req
 				return
 			}
 
-			payload := req.buf[:req.size]
-			response := s.safeHandlePacket(payload)
-			if len(response) == 0 {
-				s.packetPool.Put(req.buf)
-				continue
-			}
-
-			if _, err := conn.WriteToUDP(response, req.addr); err != nil {
-				s.log.Debugf(
-					"📤 <yellow>UDP Write Error</yellow> <magenta>|</magenta> <blue>Worker</blue>: <cyan>%d</cyan> <magenta>|</magenta> <blue>Remote</blue>: <cyan>%s</cyan> <magenta>|</magenta> <cyan>%v</cyan>",
-					workerID,
-					req.addr.String(),
-					err,
-				)
-				s.packetPool.Put(req.buf)
-				continue
+			response := s.safeHandlePacket(req.buf[:req.size])
+			if len(response) != 0 {
+				if _, err := conn.WriteToUDP(response, req.addr); err != nil {
+					s.log.Debugf(
+						"📤 <yellow>UDP Write Error, Worker: <cyan>%d</cyan>, Remote: <cyan>%v</cyan>, Error: <cyan>%v</cyan></yellow>",
+						workerID,
+						req.addr,
+						err,
+					)
+				}
 			}
 
 			s.packetPool.Put(req.buf)
@@ -568,9 +564,9 @@ func (s *Server) onDrop(addr *net.UDPAddr) {
 	}
 
 	s.log.Warnf(
-		"🚧 <yellow>Request Queue Overloaded</yellow> <magenta>|</magenta> <blue>Dropped</blue>: <magenta>%d</magenta> <magenta>|</magenta> <blue>Remote</blue>: <cyan>%s</cyan>",
+		"🚧 <yellow>Request Queue Overloaded</yellow> <magenta>|</magenta> <blue>Dropped</blue>: <magenta>%d</magenta> <magenta>|</magenta> <blue>Remote</blue>: <cyan>%v</cyan>",
 		total,
-		addr.String(),
+		addr,
 	)
 }
 
