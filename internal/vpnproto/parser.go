@@ -120,6 +120,25 @@ func parseFrom(data []byte, start int) (Packet, error) {
 		return Packet{}, ErrInvalidPacketType
 	}
 
+	// Fast-path length check
+	minLen := 2 + integrityLength
+	if flags&packetFlagStream != 0 {
+		minLen += 2
+	}
+	if flags&packetFlagSequence != 0 {
+		minLen += 2
+	}
+	if flags&packetFlagFragment != 0 {
+		minLen += 2
+	}
+	if flags&packetFlagCompression != 0 {
+		minLen++
+	}
+
+	if len(data) < minLen {
+		return Packet{}, ErrPacketTooShort
+	}
+
 	packet := Packet{
 		SessionID:  data[0],
 		PacketType: packetType,
@@ -127,27 +146,18 @@ func parseFrom(data []byte, start int) (Packet, error) {
 
 	offset := 2
 	if flags&packetFlagStream != 0 {
-		if len(data) < offset+2 {
-			return Packet{}, ErrPacketTooShort
-		}
 		packet.HasStreamID = true
 		packet.StreamID = (uint16(data[offset]) << 8) | uint16(data[offset+1])
 		offset += 2
 	}
 
 	if flags&packetFlagSequence != 0 {
-		if len(data) < offset+2 {
-			return Packet{}, ErrPacketTooShort
-		}
 		packet.HasSequenceNum = true
 		packet.SequenceNum = (uint16(data[offset]) << 8) | uint16(data[offset+1])
 		offset += 2
 	}
 
 	if flags&packetFlagFragment != 0 {
-		if len(data) < offset+2 {
-			return Packet{}, ErrPacketTooShort
-		}
 		packet.HasFragmentInfo = true
 		packet.FragmentID = data[offset]
 		packet.TotalFragments = data[offset+1]
@@ -155,16 +165,9 @@ func parseFrom(data []byte, start int) (Packet, error) {
 	}
 
 	if flags&packetFlagCompression != 0 {
-		if len(data) < offset+1 {
-			return Packet{}, ErrPacketTooShort
-		}
 		packet.HasCompressionType = true
 		packet.CompressionType = data[offset]
 		offset++
-	}
-
-	if len(data) < offset+integrityLength {
-		return Packet{}, ErrPacketTooShort
 	}
 
 	packet.SessionCookie = data[offset]
