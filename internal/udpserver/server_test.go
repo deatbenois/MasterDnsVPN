@@ -259,6 +259,75 @@ func TestHandlePacketCreatesAndReusesSessionInit(t *testing.T) {
 	}
 }
 
+func TestHandlePacketReturnsSessionBusyWhenTableIsFull(t *testing.T) {
+	codec, err := security.NewCodec(0, "")
+	if err != nil {
+		t.Fatalf("NewCodec returned error: %v", err)
+	}
+
+	srv := New(config.ServerConfig{
+		MaxPacketSize:      65535,
+		Domain:             []string{"a.com"},
+		MinVPNLabelLength:  3,
+		MaxPacketsPerBatch: 100,
+	}, nil, codec)
+	srv.sessions.activeCount = maxServerSessionSlots
+
+	verifyCode := []byte{0x10, 0x20, 0x30, 0x40}
+	payload := []byte{
+		1,
+		0x00,
+		0x00, 0x96,
+		0x00, 0xC8,
+		verifyCode[0], verifyCode[1], verifyCode[2], verifyCode[3],
+	}
+
+	response := srv.handlePacket(buildTunnelQueryWithSessionID(t, codec, "a.com", 0, Enums.PACKET_SESSION_INIT, payload))
+	if len(response) == 0 {
+		t.Fatal("expected busy response")
+	}
+
+	packet, err := DnsParser.ExtractVPNResponse(response, true)
+	if err != nil {
+		t.Fatalf("ExtractVPNResponse returned error: %v", err)
+	}
+	if packet.PacketType != Enums.PACKET_SESSION_BUSY {
+		t.Fatalf("unexpected packet type: got=%d want=%d", packet.PacketType, Enums.PACKET_SESSION_BUSY)
+	}
+	if !bytes.Equal(packet.Payload, verifyCode) {
+		t.Fatalf("unexpected busy payload: got=%v want=%v", packet.Payload, verifyCode)
+	}
+}
+
+func TestHandlePacketReturnsAlternatingErrorDropModesForUnknownSessions(t *testing.T) {
+	codec, err := security.NewCodec(0, "")
+	if err != nil {
+		t.Fatalf("NewCodec returned error: %v", err)
+	}
+
+	srv := New(config.ServerConfig{
+		MaxPacketSize:     65535,
+		Domain:            []string{"a.com"},
+		MinVPNLabelLength: 3,
+	}, nil, codec)
+
+	query := buildTunnelQueryWithCookie(t, codec, "a.com", 77, 55, Enums.PACKET_PING, nil)
+	response1 := srv.handlePacket(query)
+	response2 := srv.handlePacket(query)
+	if len(response1) == 0 || len(response2) == 0 {
+		t.Fatal("expected error responses for unknown session")
+	}
+
+	packet1, base1 := extractServerTestResponse(t, response1)
+	packet2, base2 := extractServerTestResponse(t, response2)
+	if packet1.PacketType != Enums.PACKET_ERROR_DROP || packet2.PacketType != Enums.PACKET_ERROR_DROP {
+		t.Fatalf("unexpected packet types: got1=%d got2=%d", packet1.PacketType, packet2.PacketType)
+	}
+	if base1 == base2 {
+		t.Fatalf("expected alternating response encoding modes, got base1=%t base2=%t", base1, base2)
+	}
+}
+
 func TestHandleStreamSynConnectsForwardTargetForTCPMode(t *testing.T) {
 	codec, err := security.NewCodec(0, "")
 	if err != nil {
@@ -1642,6 +1711,21 @@ func buildServerTestQuery(id uint16, name string, qtype uint16) []byte {
 	binary.BigEndian.PutUint16(packet[offset:offset+2], qtype)
 	binary.BigEndian.PutUint16(packet[offset+2:offset+4], Enums.DNSQ_CLASS_IN)
 	return packet
+}
+
+func extractServerTestResponse(t *testing.T, response []byte) (VpnProto.Packet, bool) {
+	t.Helper()
+	packet, err := DnsParser.ExtractVPNResponse(response, false)
+	if err == nil {
+		return packet, false
+	}
+	rawErr := err
+	packet, err = DnsParser.ExtractVPNResponse(response, true)
+	if err == nil {
+		return packet, true
+	}
+	t.Fatalf("failed to decode server response in either mode: rawErr=%v baseErr=%v", rawErr, err)
+	return VpnProto.Packet{}, false
 }
 
 func encodeServerTestName(name string) []byte {

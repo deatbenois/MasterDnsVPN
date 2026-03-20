@@ -407,7 +407,17 @@ func (r *stream0Runtime) processDequeue(packet arq.QueuedPacket) {
 	default:
 		if response.PacketType != 0 {
 			r.noteServerDataActivity()
+			if err := r.client.handleAsyncServerPacket(response, time.Second); err != nil && !errors.Is(err, ErrSessionDropped) && r.client.log != nil {
+				r.client.log.Debugf(
+					"🧵 <yellow>Main Queue Packet Handling Failed</yellow> <magenta>|</magenta> <cyan>%v</cyan>",
+					err,
+				)
+			}
 		}
+	}
+
+	if r.client != nil && r.client.reconnectPending.Load() {
+		return
 	}
 
 	switch {
@@ -423,6 +433,9 @@ func (r *stream0Runtime) processDequeue(packet arq.QueuedPacket) {
 }
 
 func (r *stream0Runtime) handleDequeueFailure(packet arq.QueuedPacket, now time.Time) {
+	if r != nil && r.client != nil && r.client.reconnectPending.Load() {
+		return
+	}
 	switch {
 	case packet.StreamID != 0:
 		r.rescheduleStreamPacket(packet.StreamID, packet.SequenceNum)
@@ -574,6 +587,22 @@ func (r *stream0Runtime) failAllPending() {
 	r.dnsRequests = make(map[uint16]*stream0DNSRequestState, 4)
 	r.running = false
 	r.mu.Unlock()
+}
+
+func (r *stream0Runtime) ResetForReconnect() {
+	if r == nil {
+		return
+	}
+	r.mu.Lock()
+	r.dnsRequests = make(map[uint16]*stream0DNSRequestState, 4)
+	r.dnsActivitySeen = false
+	now := time.Now()
+	r.lastDataActivity = now
+	r.lastPingTime = now
+	r.mu.Unlock()
+	if r.scheduler != nil {
+		r.scheduler.HandleSessionReset()
+	}
 }
 
 func (r *stream0Runtime) rescheduleStreamPacket(streamID uint16, sequenceNum uint16) {

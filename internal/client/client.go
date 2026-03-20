@@ -14,6 +14,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"masterdnsvpn-go/internal/arq"
@@ -87,6 +88,16 @@ type Client struct {
 	runtimeDisabled     map[string]resolverDisabledState
 	healthRuntimeRun    bool
 	recheckConnectionFn func(*Connection) bool
+
+	reconnectSignal     chan struct{}
+	reconnectPending    atomic.Bool
+	initStateMu         sync.Mutex
+	sessionInitPayload  []byte
+	sessionInitVerify   [4]byte
+	sessionInitBase64   bool
+	sessionInitReady    bool
+	sessionInitCursor   int
+	sessionInitBusyUnix atomic.Int64
 }
 
 type Connection struct {
@@ -200,6 +211,7 @@ func New(cfg config.ClientConfig, log *logger.Logger, codec *security.Codec) *Cl
 		resolverHealth:     make(map[string]*resolverHealthState, len(cfg.Domains)*len(cfg.Resolvers)),
 		resolverRecheck:    make(map[string]resolverRecheckState, len(cfg.Domains)*len(cfg.Resolvers)),
 		runtimeDisabled:    make(map[string]resolverDisabledState, len(cfg.Domains)*len(cfg.Resolvers)),
+		reconnectSignal:    make(chan struct{}, 1),
 	}
 
 	if c.localDNSCacheFlushTick <= 0 {
@@ -304,6 +316,13 @@ func (c *Client) ResetRuntimeState(resetSessionCookie bool) {
 	c.maxPackedBlocks = 1
 	c.fragmentLimits = sync.Map{}
 	c.dnsResponses = fragmentStore.New[clientDNSFragmentKey](32)
+	if c.localDNSCache != nil {
+		c.localDNSCache.ClearPending()
+	}
+	if c.stream0Runtime != nil {
+		c.stream0Runtime.ResetForReconnect()
+	}
+	c.closeAllStreams()
 	c.streamsMu.Lock()
 	c.streams = make(map[uint16]*clientStream, 16)
 	c.streamsMu.Unlock()
@@ -313,6 +332,7 @@ func (c *Client) ResetRuntimeState(resetSessionCookie bool) {
 	c.runtimeDisabled = make(map[string]resolverDisabledState, len(c.connections))
 	c.healthRuntimeRun = false
 	c.resolverHealthMu.Unlock()
+	c.clearSessionInitBusyUntil()
 }
 
 func (c *Client) updateMaxPackedBlocks() {
@@ -335,6 +355,17 @@ func (c *Client) applySyncedMTUState(uploadMTU int, downloadMTU int, uploadChars
 	c.syncedUploadChars = uploadChars
 	c.safeUploadMTU = computeSafeUploadMTU(uploadMTU, c.mtuCryptoOverhead)
 	c.updateMaxPackedBlocks()
+}
+
+func (c *Client) HasSuccessfulMTUChecks() bool {
+	return c != nil && c.successMTUChecks
+}
+
+func (c *Client) MarkMTUChecksStale() {
+	if c == nil {
+		return
+	}
+	c.successMTUChecks = false
 }
 
 func (c *Client) applySessionCompressionPolicy() {
@@ -507,6 +538,27 @@ func (c *Client) deleteStream(streamID uint16) {
 			close(stream.StopCh)
 		})
 		_ = stream.Conn.Close()
+	}
+}
+
+func (c *Client) closeAllStreams() {
+	if c == nil {
+		return
+	}
+	c.streamsMu.Lock()
+	streams := c.streams
+	c.streams = make(map[uint16]*clientStream, 16)
+	c.streamsMu.Unlock()
+	for _, stream := range streams {
+		if stream == nil {
+			continue
+		}
+		stream.stopOnce.Do(func() {
+			close(stream.StopCh)
+		})
+		if stream.Conn != nil {
+			_ = stream.Conn.Close()
+		}
 	}
 }
 

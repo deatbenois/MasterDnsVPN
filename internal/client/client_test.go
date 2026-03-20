@@ -27,6 +27,17 @@ import (
 	VpnProto "masterdnsvpn-go/internal/vpnproto"
 )
 
+type noopConn struct{}
+
+func (n *noopConn) Read(b []byte) (int, error)       { return 0, io.EOF }
+func (n *noopConn) Write(b []byte) (int, error)      { return len(b), nil }
+func (n *noopConn) Close() error                     { return nil }
+func (n *noopConn) LocalAddr() net.Addr              { return nil }
+func (n *noopConn) RemoteAddr() net.Addr             { return nil }
+func (n *noopConn) SetDeadline(time.Time) error      { return nil }
+func (n *noopConn) SetReadDeadline(time.Time) error  { return nil }
+func (n *noopConn) SetWriteDeadline(time.Time) error { return nil }
+
 func TestBuildConnectionMap(t *testing.T) {
 	cfg := config.ClientConfig{
 		ProtocolType: "SOCKS5",
@@ -162,6 +173,96 @@ func TestValidateServerPacketAllowsPreSessionResponses(t *testing.T) {
 	}
 	if !c.validateServerPacket(VpnProto.Packet{PacketType: Enums.PACKET_SESSION_ACCEPT}) {
 		t.Fatal("pre-session session-accept should be accepted")
+	}
+	if !c.validateServerPacket(VpnProto.Packet{PacketType: Enums.PACKET_SESSION_BUSY}) {
+		t.Fatal("pre-session session-busy response should be accepted")
+	}
+	if !c.validateServerPacket(VpnProto.Packet{PacketType: Enums.PACKET_ERROR_DROP}) {
+		t.Fatal("pre-session error-drop response should be accepted")
+	}
+}
+
+func TestInitializeSessionReturnsBusyForMatchingVerifyCode(t *testing.T) {
+	codec, err := security.NewCodec(0, "")
+	if err != nil {
+		t.Fatalf("NewCodec returned error: %v", err)
+	}
+	c := New(config.ClientConfig{
+		Domains: []string{"a.com", "b.com"},
+		Resolvers: []config.ResolverAddress{
+			{IP: "1.1.1.1", Port: 53},
+			{IP: "8.8.8.8", Port: 53},
+		},
+		MTUTestTimeout: 1,
+	}, nil, codec)
+	c.BuildConnectionMap()
+	c.applySyncedMTUState(150, 200, 220)
+
+	callCount := 0
+	c.exchangeQueryFn = func(conn Connection, packet []byte, timeout time.Duration) ([]byte, error) {
+		callCount++
+		response, err := DnsParser.BuildVPNResponsePacket(packet, conn.Domain, VpnProto.Packet{
+			SessionID:  0,
+			PacketType: Enums.PACKET_SESSION_BUSY,
+			Payload:    c.sessionInitVerify[:],
+		}, c.sessionInitBase64)
+		if err != nil {
+			t.Fatalf("BuildVPNResponsePacket returned error: %v", err)
+		}
+		return response, nil
+	}
+
+	err = c.InitializeSession(1)
+	if !errors.Is(err, ErrSessionInitBusy) {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if callCount != 1 {
+		t.Fatalf("expected one init attempt, got=%d", callCount)
+	}
+	if until := c.sessionInitBusyUntil(); until.IsZero() || time.Until(until) <= 0 {
+		t.Fatal("expected session busy deadline to be set")
+	}
+}
+
+func TestHandleServerDropPacketResetsRuntimeOnce(t *testing.T) {
+	c := New(config.ClientConfig{}, nil, nil)
+	stream := &clientStream{
+		ID:     9,
+		Conn:   &noopConn{},
+		TXWake: make(chan struct{}, 1),
+		StopCh: make(chan struct{}),
+	}
+	c.storeStream(stream)
+	c.sessionID = 7
+	c.sessionCookie = 99
+	c.sessionReady = true
+	c.sessionInitPayload = []byte{1, 2, 3}
+	c.sessionInitReady = true
+
+	packet := VpnProto.Packet{PacketType: Enums.PACKET_ERROR_DROP, SessionID: 7}
+	if err := c.handleServerDropPacket(packet); !errors.Is(err, ErrSessionDropped) {
+		t.Fatalf("unexpected first drop error: %v", err)
+	}
+	if c.SessionReady() {
+		t.Fatal("session should be cleared after drop")
+	}
+	if c.sessionInitReady || len(c.sessionInitPayload) != 0 {
+		t.Fatal("session init state should be reset on first drop")
+	}
+	if !c.reconnectPending.Load() {
+		t.Fatal("reconnect should be pending after drop")
+	}
+	if _, ok := c.getStream(stream.ID); ok {
+		t.Fatal("active stream should be cleared after drop")
+	}
+
+	c.sessionInitPayload = []byte{9}
+	c.sessionInitReady = true
+	if err := c.handleServerDropPacket(packet); err != nil {
+		t.Fatalf("unexpected repeated drop error: %v", err)
+	}
+	if !c.sessionInitReady || len(c.sessionInitPayload) != 1 {
+		t.Fatal("repeated delayed drop should not reset init state again")
 	}
 }
 
@@ -1734,6 +1835,72 @@ func TestSendScheduledPacketFailsWithoutValidConnections(t *testing.T) {
 	})
 	if !errors.Is(sendErr, ErrNoValidConnections) {
 		t.Fatalf("unexpected error: %v", sendErr)
+	}
+}
+
+func TestStream0RuntimeProcessDequeueHandlesServerDrop(t *testing.T) {
+	codec, err := security.NewCodec(0, "")
+	if err != nil {
+		t.Fatalf("NewCodec returned error: %v", err)
+	}
+
+	c := New(config.ClientConfig{
+		LocalDNSPendingTimeoutSec: 1,
+		Domains:                   []string{"v.example.com"},
+	}, nil, codec)
+	c.connections = []Connection{{
+		Domain:        "v.example.com",
+		Resolver:      "127.0.0.1",
+		ResolverPort:  5353,
+		ResolverLabel: "127.0.0.1:5353",
+		Key:           "127.0.0.1|5353|v.example.com",
+		IsValid:       true,
+	}}
+	c.connectionsByKey = map[string]int{c.connections[0].Key: 0}
+	c.rebuildBalancer()
+	c.sessionID = 7
+	c.sessionCookie = 9
+	c.sessionReady = true
+	c.sessionInitPayload = []byte{1, 2, 3}
+	c.sessionInitReady = true
+
+	c.exchangeQueryFn = func(conn Connection, packet []byte, timeout time.Duration) ([]byte, error) {
+		parsed, err := DnsParser.ParsePacketLite(packet)
+		if err != nil {
+			t.Fatalf("ParsePacketLite returned error: %v", err)
+		}
+		if !parsed.HasQuestion {
+			t.Fatal("expected dns question in scheduled packet")
+		}
+		response, err := DnsParser.BuildVPNResponsePacket(packet, parsed.FirstQuestion.Name, VpnProto.Packet{
+			SessionID:  7,
+			PacketType: Enums.PACKET_ERROR_DROP,
+			Payload:    []byte("INV"),
+		}, false)
+		if err != nil {
+			t.Fatalf("BuildVPNResponsePacket returned error: %v", err)
+		}
+		return response, nil
+	}
+
+	c.stream0Runtime.processDequeue(arq.QueuedPacket{
+		PacketType:     Enums.PACKET_DNS_QUERY_REQ,
+		StreamID:       0,
+		SequenceNum:    1,
+		FragmentID:     0,
+		TotalFragments: 1,
+		Payload:        []byte{1},
+		Priority:       arq.DefaultPriorityForPacket(Enums.PACKET_DNS_QUERY_REQ),
+	})
+
+	if !c.reconnectPending.Load() {
+		t.Fatal("expected reconnect to be pending after queued main-packet drop response")
+	}
+	if c.SessionReady() {
+		t.Fatal("expected session to be cleared after queued main-packet drop response")
+	}
+	if c.sessionInitReady || len(c.sessionInitPayload) != 0 {
+		t.Fatal("expected session init state to be reset after queued main-packet drop response")
 	}
 }
 

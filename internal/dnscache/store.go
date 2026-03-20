@@ -277,6 +277,24 @@ func (s *Store) HasPending() bool {
 	return s.pendingCount > 0
 }
 
+func (s *Store) ClearPending() {
+	if s == nil {
+		return
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	for element := s.order.Front(); element != nil; {
+		next := element.Next()
+		node := element.Value.(*cacheNode)
+		if node.entry.Status == StatusPending {
+			s.removeElement(element)
+		}
+		element = next
+	}
+}
+
 func (s *Store) isExpired(entry *Entry, now time.Time) bool {
 	if entry == nil {
 		return true

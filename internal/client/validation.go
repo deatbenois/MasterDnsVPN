@@ -14,7 +14,11 @@ import (
 
 func isPreSessionResponseType(packetType uint8) bool {
 	switch packetType {
-	case Enums.PACKET_MTU_UP_RES, Enums.PACKET_MTU_DOWN_RES, Enums.PACKET_SESSION_ACCEPT:
+	case Enums.PACKET_MTU_UP_RES,
+		Enums.PACKET_MTU_DOWN_RES,
+		Enums.PACKET_SESSION_ACCEPT,
+		Enums.PACKET_SESSION_BUSY,
+		Enums.PACKET_ERROR_DROP:
 		return true
 	default:
 		return false

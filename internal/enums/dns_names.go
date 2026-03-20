@@ -114,6 +114,8 @@ func PacketTypeName(packetType uint8) string {
 		return "DNS_QUERY_RES_ACK"
 	case PACKET_SESSION_CLOSE:
 		return "SESSION_CLOSE"
+	case PACKET_SESSION_BUSY:
+		return "SESSION_BUSY"
 	case PACKET_ERROR_DROP:
 		return "ERROR_DROP"
 	default:

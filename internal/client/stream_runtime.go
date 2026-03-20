@@ -129,8 +129,10 @@ func (c *Client) handleFollowUpServerPacket(packet VpnProto.Packet, timeout time
 	current := packet
 	for range maxClientStreamFollowUps {
 		switch current.PacketType {
-		case 0, Enums.PACKET_PONG, Enums.PACKET_STREAM_DATA_ACK, Enums.PACKET_STREAM_FIN_ACK, Enums.PACKET_STREAM_RST_ACK, Enums.PACKET_STREAM_SYN_ACK, Enums.PACKET_SOCKS5_SYN_ACK:
+		case 0, Enums.PACKET_PONG, Enums.PACKET_STREAM_DATA_ACK, Enums.PACKET_STREAM_FIN_ACK, Enums.PACKET_STREAM_RST_ACK, Enums.PACKET_STREAM_SYN_ACK, Enums.PACKET_SOCKS5_SYN_ACK, Enums.PACKET_SESSION_BUSY:
 			return nil
+		case Enums.PACKET_ERROR_DROP:
+			return c.handleServerDropPacket(current)
 		case Enums.PACKET_DNS_QUERY_REQ_ACK:
 			if c.stream0Runtime != nil {
 				c.stream0Runtime.ackDNSRequestFragment(current)
