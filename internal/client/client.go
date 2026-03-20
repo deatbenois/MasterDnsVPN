@@ -110,6 +110,7 @@ type Client struct {
 	resolverConns   map[string]chan *net.UDPConn
 
 	udpBufferPool sync.Pool
+	mtuProbeCounter atomic.Uint64
 }
 
 const (

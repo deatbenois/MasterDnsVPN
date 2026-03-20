@@ -9,11 +9,11 @@ package client
 
 import (
 	"bytes"
-	"crypto/rand"
 	"encoding/binary"
 	"errors"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	DnsParser "masterdnsvpn-go/internal/dnsparser"
 	Enums "masterdnsvpn-go/internal/enums"
@@ -31,8 +31,6 @@ const (
 	defaultMTUMinFloor  = 30
 	defaultUploadMaxCap = 512
 )
-
-const mtuProbeFillPattern = "MasterDnsVPN-MTU-Probe-Fill-Pattern-2026"
 
 var (
 	maxUploadProbePacketType = VpnProto.MaxHeaderPacketType()
@@ -93,13 +91,15 @@ func (c *Client) RunInitialMTUTests() error {
 	} else {
 		jobs := make(chan int, len(c.connections))
 		var wg sync.WaitGroup
-		for range workerCount {
-			wg.Go(func() {
+		for i := 0; i < workerCount; i++ {
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
 				for idx := range jobs {
 					conn := &c.connections[idx]
 					c.runConnectionMTUTest(conn, idx+1, len(c.connections), uploadCaps[conn.Domain], counters)
 				}
-			})
+			}()
 		}
 		for idx := range c.connections {
 			jobs <- idx
@@ -698,7 +698,19 @@ func (c *Client) maxUploadMTUPayload(domain string) int {
 }
 
 func (c *Client) canBuildUploadPayload(domain string, payloadLen int) bool {
-	payload := make([]byte, payloadLen)
+	if payloadLen <= 0 {
+		return true
+	}
+
+	buf := c.udpBufferPool.Get().([]byte)
+	defer c.udpBufferPool.Put(buf)
+
+	if payloadLen > len(buf) {
+		return false
+	}
+
+	payload := buf[:payloadLen]
+	// No need to fill data just to check length
 	encoded, err := VpnProto.BuildEncoded(VpnProto.BuildOptions{
 		SessionID:       255,
 		PacketType:      maxUploadProbePacketType,
@@ -730,41 +742,46 @@ func (c *Client) buildMTUProbePayload(length int, reservedTailPrefix int) ([]byt
 		payload[0] = mtuProbeBase64Reply
 	}
 
-	code, err := randomBytes(mtuProbeCodeLength)
-	if err != nil {
-		return nil, nil, false, err
-	}
+	// Use atomic counter for unique probe IDs (Fast & Unique)
+	code := make([]byte, mtuProbeCodeLength)
+	binary.BigEndian.PutUint32(code, uint32(c.mtuProbeCounter.Add(1)))
 	copy(payload[1:1+mtuProbeCodeLength], code)
 
 	fillOffset := 1 + mtuProbeCodeLength + reservedTailPrefix
 	if fillOffset < len(payload) {
-		fillMTUProbeBytes(payload[fillOffset:])
+		fillMTUProbeBytesFast(payload[fillOffset:], uint64(time.Now().UnixNano()))
 	}
 
 	return payload, code, useBase64, nil
 }
 
-func fillMTUProbeBytes(dst []byte) {
-	if len(dst) == 0 {
+func fillMTUProbeBytesFast(dst []byte, seed uint64) {
+	n := len(dst)
+	if n == 0 {
 		return
 	}
-	pattern := mtuProbeFillPattern
-	offset := 0
-	for offset < len(dst) {
-		offset += copy(dst[offset:], pattern)
+
+	// Fast Xorshift PRNG to fill with non-duplicate data
+	state := seed
+	if state == 0 {
+		state = 0x9e3779b97f4a7c15
+	}
+
+	for i := 0; i < n; i += 8 {
+		state ^= state << 13
+		state ^= state >> 7
+		state ^= state << 17
+		if n-i >= 8 {
+			binary.BigEndian.PutUint64(dst[i:i+8], state)
+		} else {
+			remaining := n - i
+			var tmp [8]byte
+			binary.BigEndian.PutUint64(tmp[:], state)
+			copy(dst[i:], tmp[:remaining])
+		}
 	}
 }
 
-func randomBytes(length int) ([]byte, error) {
-	if length <= 0 {
-		return []byte{}, nil
-	}
-	buf := make([]byte, length)
-	if _, err := rand.Read(buf); err != nil {
-		return nil, err
-	}
-	return buf, nil
-}
 
 func summarizeValidMTUConnections(connections []Connection) (validConns []Connection, minUpload int, minDownload int, minUploadChars int) {
 	validConns = make([]Connection, 0, len(connections))
@@ -791,7 +808,15 @@ func (c *Client) encodedCharsForPayload(payloadLen int) int {
 	if payloadLen <= 0 {
 		return 0
 	}
-	payload := make([]byte, payloadLen)
+
+	buf := c.udpBufferPool.Get().([]byte)
+	defer c.udpBufferPool.Put(buf)
+
+	if payloadLen > len(buf) {
+		return 0
+	}
+
+	payload := buf[:payloadLen]
 	encoded, err := VpnProto.BuildEncoded(VpnProto.BuildOptions{
 		SessionID:       255,
 		PacketType:      Enums.PACKET_STREAM_DATA,
