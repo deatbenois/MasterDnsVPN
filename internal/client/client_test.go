@@ -359,7 +359,7 @@ func TestHandleDNSQueryPacketCreatesPendingEntry(t *testing.T) {
 	c.now = func() time.Time { return now }
 
 	query := buildClientTestDNSQuery(0x1234, "example.com", Enums.DNS_RECORD_TYPE_A, Enums.DNSQ_CLASS_IN)
-	response, dispatch := c.handleDNSQueryPacket(query)
+	response, dispatch := c.handleDNSQueryPacket(query, c.now())
 	if dispatch == nil {
 		t.Fatal("expected pending dispatch request")
 	}
@@ -395,7 +395,7 @@ func TestHandleDNSQueryPacketUsesReadyCache(t *testing.T) {
 	rawResponse = append(rawResponse, 0x00, byte(Enums.DNS_RECORD_TYPE_A), 0x00, byte(Enums.DNSQ_CLASS_IN))
 	c.LocalDNSCache().SetReady(cacheKey, "example.com", Enums.DNS_RECORD_TYPE_A, Enums.DNSQ_CLASS_IN, rawResponse, now)
 
-	response, dispatch := c.handleDNSQueryPacket(query)
+	response, dispatch := c.handleDNSQueryPacket(query, c.now())
 	if dispatch != nil {
 		t.Fatal("did not expect dispatch for ready cache hit")
 	}
@@ -411,7 +411,7 @@ func TestHandleDNSQueryPacketRejectsUnsupportedQueryType(t *testing.T) {
 	c := New(config.ClientConfig{}, nil, nil)
 	query := buildClientTestDNSQuery(0x1234, "example.com", Enums.DNS_RECORD_TYPE_ANY, Enums.DNSQ_CLASS_IN)
 
-	response, dispatch := c.handleDNSQueryPacket(query)
+	response, dispatch := c.handleDNSQueryPacket(query, c.now())
 	if dispatch != nil {
 		t.Fatal("unsupported query should not dispatch")
 	}
@@ -513,7 +513,7 @@ func TestResolveDNSQueryPacketDedupesPendingDispatch(t *testing.T) {
 
 func TestHandleDNSQueryPacketRejectsMalformedQuery(t *testing.T) {
 	c := New(config.ClientConfig{}, nil, nil)
-	response, dispatch := c.handleDNSQueryPacket([]byte{0x12, 0x34, 0x00})
+	response, dispatch := c.handleDNSQueryPacket([]byte{0x12, 0x34, 0x00}, c.now())
 	if dispatch != nil {
 		t.Fatal("did not expect dispatch for malformed query")
 	}
@@ -523,7 +523,7 @@ func TestHandleDNSQueryPacketRejectsMalformedQuery(t *testing.T) {
 
 	query := buildClientTestDNSQuery(0x1234, "example.com", Enums.DNS_RECORD_TYPE_A, Enums.DNSQ_CLASS_IN)
 	query = query[:len(query)-2]
-	response, dispatch = c.handleDNSQueryPacket(query)
+	response, dispatch = c.handleDNSQueryPacket(query, c.now())
 	if dispatch != nil {
 		t.Fatal("did not expect dispatch for malformed dns query")
 	}

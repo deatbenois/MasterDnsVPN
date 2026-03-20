@@ -8,6 +8,8 @@
 package client
 
 import (
+	"time"
+
 	dnsCache "masterdnsvpn-go/internal/dnscache"
 	DnsParser "masterdnsvpn-go/internal/dnsparser"
 	Enums "masterdnsvpn-go/internal/enums"
@@ -27,8 +29,7 @@ type dnsQueryMetadata struct {
 	Parsed DnsParser.LitePacket
 }
 
-func (c *Client) handleDNSQueryPacket(query []byte) ([]byte, *dnsDispatchRequest) {
-	c.ensureLocalDNSCacheLoaded()
+func (c *Client) handleDNSQueryPacket(query []byte, now time.Time) ([]byte, *dnsDispatchRequest) {
 
 	metadata, err := parseDNSQueryMetadata(query)
 	if err != nil {
@@ -60,7 +61,6 @@ func (c *Client) handleDNSQueryPacket(query []byte) ([]byte, *dnsDispatchRequest
 		recordTypeName = Enums.DNSRecordTypeName(metadata.QType)
 	}
 
-	now := c.now()
 	if cached, ok := c.localDNSCache.GetReady(cacheKey, query, now); ok {
 		if c.log != nil {
 			c.log.Infof(
@@ -93,13 +93,13 @@ func (c *Client) handleDNSQueryPacket(query []byte) ([]byte, *dnsDispatchRequest
 }
 
 func (c *Client) resolveDNSQueryPacket(query []byte) []byte {
-	response, dispatch := c.handleDNSQueryPacket(query)
+	now := c.now()
+	response, dispatch := c.handleDNSQueryPacket(query, now)
 	if dispatch == nil {
+		if c.stream0Runtime != nil && c.stream0Runtime.IsRunning() {
+			c.stream0Runtime.NotifyDNSActivity()
+		}
 		return response
-	}
-
-	if c.stream0Runtime != nil && c.stream0Runtime.IsRunning() {
-		c.stream0Runtime.NotifyDNSActivity()
 	}
 
 	if c.log != nil {
