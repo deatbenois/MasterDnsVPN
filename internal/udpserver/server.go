@@ -423,6 +423,10 @@ func (s *Server) handleTunnelCandidate(packet []byte, parsed DnsParser.LitePacke
 }
 
 func (s *Server) handlePostSessionPacket(decision domainMatcher.Decision, vpnPacket VpnProto.Packet, sessionRecord *sessionRuntimeView) bool {
+	if handled := s.handleClosedStreamPacket(vpnPacket); handled {
+		return true
+	}
+
 	switch vpnPacket.PacketType {
 	case Enums.PACKET_PACKED_CONTROL_BLOCKS:
 		return s.handlePackedControlBlocksRequest(vpnPacket, sessionRecord)
@@ -444,6 +448,35 @@ func (s *Server) handlePostSessionPacket(decision domainMatcher.Decision, vpnPac
 		return s.handleStreamFinRequest(vpnPacket, sessionRecord)
 	case Enums.PACKET_STREAM_RST:
 		return s.handleStreamRSTRequest(vpnPacket, sessionRecord)
+	default:
+		return false
+	}
+}
+
+func (s *Server) handleClosedStreamPacket(vpnPacket VpnProto.Packet) bool {
+	if s == nil || vpnPacket.StreamID == 0 || !isClosedStreamAwarePacketType(vpnPacket.PacketType) {
+		return false
+	}
+	response, handled := s.streams.HandleClosedPacket(vpnPacket.SessionID, vpnPacket.StreamID, vpnPacket.PacketType, vpnPacket.SequenceNum, time.Now())
+	if !handled {
+		return false
+	}
+	if response.PacketType != 0 {
+		_ = s.queueSessionPacket(vpnPacket.SessionID, response)
+	}
+	return true
+}
+
+func isClosedStreamAwarePacketType(packetType uint8) bool {
+	switch packetType {
+	case Enums.PACKET_STREAM_SYN,
+		Enums.PACKET_SOCKS5_SYN,
+		Enums.PACKET_STREAM_DATA,
+		Enums.PACKET_STREAM_RESEND,
+		Enums.PACKET_STREAM_DATA_ACK,
+		Enums.PACKET_STREAM_FIN,
+		Enums.PACKET_STREAM_RST:
+		return true
 	default:
 		return false
 	}

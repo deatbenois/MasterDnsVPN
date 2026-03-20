@@ -21,9 +21,11 @@ import (
 	"masterdnsvpn-go/internal/compression"
 	"masterdnsvpn-go/internal/config"
 	dnsCache "masterdnsvpn-go/internal/dnscache"
+	Enums "masterdnsvpn-go/internal/enums"
 	fragmentStore "masterdnsvpn-go/internal/fragmentstore"
 	"masterdnsvpn-go/internal/logger"
 	"masterdnsvpn-go/internal/security"
+	VpnProto "masterdnsvpn-go/internal/vpnproto"
 )
 
 type Client struct {
@@ -76,6 +78,7 @@ type Client struct {
 	stream0Runtime                        *stream0Runtime
 	streamsMu                             sync.RWMutex
 	streams                               map[uint16]*clientStream
+	closedStreams                         map[uint16]int64
 	mtuTestRetries                        int
 	mtuTestTimeout                        time.Duration
 	packetDuplicationCount                int
@@ -103,6 +106,11 @@ type Client struct {
 	sessionInitCursor   int
 	sessionInitBusyUnix atomic.Int64
 }
+
+const (
+	clientClosedStreamRecordTTL = 45 * time.Second
+	clientClosedStreamRecordCap = 2000
+)
 
 type Connection struct {
 	Domain           string
@@ -194,6 +202,7 @@ func New(cfg config.ClientConfig, log *logger.Logger, codec *security.Codec) *Cl
 		),
 		localDNSFragTTL:                       time.Duration(cfg.LocalDNSFragmentTimeoutSec * float64(time.Second)),
 		streams:                               make(map[uint16]*clientStream, 16),
+		closedStreams:                         make(map[uint16]int64, 16),
 		mtuTestRetries:                        cfg.MTUTestRetries,
 		mtuTestTimeout:                        time.Duration(cfg.MTUTestTimeout * float64(time.Second)),
 		packetDuplicationCount:                cfg.PacketDuplicationCount,
@@ -348,6 +357,7 @@ func (c *Client) ResetRuntimeState(resetSessionCookie bool) {
 	c.closeAllStreams()
 	c.streamsMu.Lock()
 	c.streams = make(map[uint16]*clientStream, 16)
+	c.closedStreams = make(map[uint16]int64, 16)
 	c.streamsMu.Unlock()
 	c.resolverHealthMu.Lock()
 	c.resolverHealth = make(map[string]*resolverHealthState, len(c.connections))
@@ -555,6 +565,7 @@ func (c *Client) deleteStream(streamID uint16) {
 	c.streamsMu.Lock()
 	stream := c.streams[streamID]
 	delete(c.streams, streamID)
+	c.noteClosedStreamLocked(streamID, time.Now())
 	c.streamsMu.Unlock()
 	if stream != nil && stream.Conn != nil {
 		stream.stopOnce.Do(func() {
@@ -571,6 +582,7 @@ func (c *Client) closeAllStreams() {
 	c.streamsMu.Lock()
 	streams := c.streams
 	c.streams = make(map[uint16]*clientStream, 16)
+	c.closedStreams = make(map[uint16]int64, 16)
 	c.streamsMu.Unlock()
 	for _, stream := range streams {
 		if stream == nil {
@@ -583,6 +595,120 @@ func (c *Client) closeAllStreams() {
 			_ = stream.Conn.Close()
 		}
 	}
+}
+
+func (c *Client) handleClosedStreamPacket(packet VpnProto.Packet, timeout time.Duration) (VpnProto.Packet, bool, error) {
+	if c == nil || packet.StreamID == 0 || !c.isRecentlyClosedStream(packet.StreamID, time.Now()) {
+		return VpnProto.Packet{}, false, nil
+	}
+
+	responsePacket := VpnProto.Packet{
+		StreamID:       packet.StreamID,
+		HasStreamID:    true,
+		SequenceNum:    packet.SequenceNum,
+		HasSequenceNum: packet.SequenceNum != 0,
+	}
+
+	outgoingType := uint8(0)
+	switch packet.PacketType {
+	case Enums.PACKET_STREAM_FIN:
+		outgoingType = Enums.PACKET_STREAM_FIN_ACK
+		responsePacket.PacketType = outgoingType
+	case Enums.PACKET_STREAM_RST:
+		outgoingType = Enums.PACKET_STREAM_RST_ACK
+		responsePacket.PacketType = outgoingType
+	case Enums.PACKET_STREAM_DATA, Enums.PACKET_STREAM_RESEND, Enums.PACKET_STREAM_DATA_ACK:
+		outgoingType = Enums.PACKET_STREAM_RST
+		responsePacket.PacketType = outgoingType
+		responsePacket.SequenceNum = 0
+		responsePacket.HasSequenceNum = false
+	default:
+		return VpnProto.Packet{}, false, nil
+	}
+
+	_ = c.sendClosedStreamOneWayPacket(outgoingType, packet.StreamID, responsePacket.SequenceNum, timeout)
+	return responsePacket, true, nil
+}
+
+func (c *Client) sendClosedStreamOneWayPacket(packetType uint8, streamID uint16, sequenceNum uint16, timeout time.Duration) error {
+	if c == nil || !c.SessionReady() {
+		return nil
+	}
+
+	connections, err := c.selectTargetConnectionsForPacket(packetType, streamID)
+	if err != nil {
+		return err
+	}
+	deadline := time.Now().Add(normalizeTimeout(timeout, defaultRuntimeTimeout))
+	var firstErr error
+	for _, connection := range connections {
+		query, buildErr := c.buildStreamQuery(connection.Domain, packetType, streamID, sequenceNum, 0, 1, nil)
+		if buildErr != nil {
+			if firstErr == nil {
+				firstErr = buildErr
+			}
+			continue
+		}
+		if sendErr := c.sendOneWaySessionPacket(connection, query, deadline); sendErr != nil && firstErr == nil {
+			firstErr = sendErr
+		}
+	}
+	return firstErr
+}
+
+func (c *Client) isRecentlyClosedStream(streamID uint16, now time.Time) bool {
+	if c == nil || streamID == 0 {
+		return false
+	}
+
+	c.streamsMu.RLock()
+	closedAt, ok := c.closedStreams[streamID]
+	c.streamsMu.RUnlock()
+	if !ok {
+		return false
+	}
+	if now.UnixNano()-closedAt <= clientClosedStreamRecordTTL.Nanoseconds() {
+		return true
+	}
+
+	c.streamsMu.Lock()
+	if staleAt, stale := c.closedStreams[streamID]; stale && staleAt == closedAt && now.UnixNano()-staleAt > clientClosedStreamRecordTTL.Nanoseconds() {
+		delete(c.closedStreams, streamID)
+	}
+	c.streamsMu.Unlock()
+	return false
+}
+
+func (c *Client) noteClosedStreamLocked(streamID uint16, now time.Time) {
+	if c == nil || streamID == 0 {
+		return
+	}
+	if c.closedStreams == nil {
+		c.closedStreams = make(map[uint16]int64, 16)
+	}
+	nowUnix := now.UnixNano()
+	expiredBefore := nowUnix - clientClosedStreamRecordTTL.Nanoseconds()
+	for closedID, closedAt := range c.closedStreams {
+		if closedAt < expiredBefore {
+			delete(c.closedStreams, closedID)
+		}
+	}
+	c.closedStreams[streamID] = nowUnix
+	if len(c.closedStreams) <= clientClosedStreamRecordCap {
+		return
+	}
+
+	var oldestID uint16
+	var oldestAt int64
+	first := true
+	for closedID, closedAt := range c.closedStreams {
+		if first || closedAt < oldestAt {
+			oldestID = closedID
+			oldestAt = closedAt
+			first = false
+		}
+	}
+	delete(c.closedStreams, oldestID)
 }
 
 func (c *Client) activeStreamCount() int {

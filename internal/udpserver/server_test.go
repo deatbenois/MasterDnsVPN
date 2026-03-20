@@ -380,6 +380,54 @@ func TestHandleStreamSynConnectsForwardTargetForTCPMode(t *testing.T) {
 	}
 }
 
+func TestHandlePacketReturnsResetForLateClosedStreamData(t *testing.T) {
+	codec, err := security.NewCodec(0, "")
+	if err != nil {
+		t.Fatalf("NewCodec returned error: %v", err)
+	}
+
+	srv := New(config.ServerConfig{
+		MaxPacketSize:     65535,
+		Domain:            []string{"a.com"},
+		MinVPNLabelLength: 3,
+	}, nil, codec)
+
+	verifyCode := []byte{1, 2, 3, 4}
+	initPayload := []byte{0, 0x00, 0x00, 0x96, 0x00, 0xC8, verifyCode[0], verifyCode[1], verifyCode[2], verifyCode[3]}
+	initResponse := srv.handlePacket(buildTunnelQueryWithSessionID(t, codec, "a.com", 0, Enums.PACKET_SESSION_INIT, initPayload))
+	packet, err := DnsParser.ExtractVPNResponse(initResponse, false)
+	if err != nil {
+		t.Fatalf("ExtractVPNResponse returned error: %v", err)
+	}
+
+	sessionID := packet.Payload[0]
+	sessionCookie := packet.Payload[1]
+	now := time.Now()
+	if _, created := srv.streams.EnsureOpen(sessionID, 9, now); !created {
+		t.Fatal("expected fresh stream state")
+	}
+	if !srv.streams.MarkReset(sessionID, 9, 5, now) {
+		t.Fatal("expected stream reset to succeed")
+	}
+
+	query := buildTunnelStreamQuery(t, codec, "a.com", sessionID, sessionCookie, Enums.PACKET_STREAM_DATA, 9, 77, []byte("late"))
+	response := srv.handlePacket(query)
+	if len(response) == 0 {
+		t.Fatal("expected late closed stream packet to get a response")
+	}
+
+	vpnResponse, err := DnsParser.ExtractVPNResponse(response, false)
+	if err != nil {
+		t.Fatalf("ExtractVPNResponse returned error: %v", err)
+	}
+	if vpnResponse.PacketType != Enums.PACKET_STREAM_RST {
+		t.Fatalf("unexpected packet type: got=%d want=%d", vpnResponse.PacketType, Enums.PACKET_STREAM_RST)
+	}
+	if vpnResponse.StreamID != 9 || vpnResponse.SequenceNum != 0 {
+		t.Fatalf("unexpected stream reset routing: stream=%d seq=%d", vpnResponse.StreamID, vpnResponse.SequenceNum)
+	}
+}
+
 func TestHandlePacketRejectsMalformedSessionInit(t *testing.T) {
 	codec, err := security.NewCodec(0, "")
 	if err != nil {

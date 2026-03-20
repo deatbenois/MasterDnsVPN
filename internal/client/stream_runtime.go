@@ -201,6 +201,9 @@ func (c *Client) handlePackedServerControlBlocks(payload []byte, timeout time.Du
 func (c *Client) handleInboundStreamPacket(packet VpnProto.Packet, timeout time.Duration) (VpnProto.Packet, error) {
 	stream, ok := c.getStream(packet.StreamID)
 	if !ok || stream == nil {
+		if closedResponse, handled, err := c.handleClosedStreamPacket(packet, timeout); handled {
+			return closedResponse, err
+		}
 		return c.exchangeStreamControlPacket(Enums.PACKET_STREAM_RST, packet.StreamID, packet.SequenceNum, nil, timeout)
 	}
 

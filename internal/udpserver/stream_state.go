@@ -14,6 +14,12 @@ import (
 
 	Enums "masterdnsvpn-go/internal/enums"
 	"masterdnsvpn-go/internal/streamutil"
+	VpnProto "masterdnsvpn-go/internal/vpnproto"
+)
+
+const (
+	serverClosedStreamRecordTTL = 45 * time.Second
+	serverClosedStreamRecordCap = 1000
 )
 
 type streamStateRecord struct {
@@ -37,11 +43,13 @@ type streamStateRecord struct {
 type streamStateStore struct {
 	mu       sync.Mutex
 	sessions map[uint8]map[uint16]*streamStateRecord
+	closed   map[uint8]map[uint16]int64
 }
 
 func newStreamStateStore() *streamStateStore {
 	return &streamStateStore{
 		sessions: make(map[uint8]map[uint16]*streamStateRecord, 32),
+		closed:   make(map[uint8]map[uint16]int64, 32),
 	}
 }
 
@@ -235,6 +243,7 @@ func (s *streamStateStore) ResetWithNextOutboundSequence(sessionID uint8, stream
 	record.LastActivityAt = now
 	record.LastSequence = nextSeq
 	record.State = Enums.STREAM_STATE_RESET
+	s.noteClosedLocked(sessionID, streamID, now.UnixNano())
 	delete(streams, streamID)
 	if len(streams) == 0 {
 		delete(s.sessions, sessionID)
@@ -259,6 +268,7 @@ func (s *streamStateStore) MarkReset(sessionID uint8, streamID uint16, sequenceN
 	record.LastActivityAt = now
 	record.LastSequence = sequenceNum
 	record.State = Enums.STREAM_STATE_RESET
+	s.noteClosedLocked(sessionID, streamID, now.UnixNano())
 	delete(streams, streamID)
 	if len(streams) == 0 {
 		delete(s.sessions, sessionID)
@@ -293,6 +303,7 @@ func (s *streamStateStore) RemoveSession(sessionID uint8) {
 	s.mu.Lock()
 	streams := s.sessions[sessionID]
 	delete(s.sessions, sessionID)
+	delete(s.closed, sessionID)
 	s.mu.Unlock()
 	for _, record := range streams {
 		if record != nil {
@@ -301,11 +312,99 @@ func (s *streamStateStore) RemoveSession(sessionID uint8) {
 	}
 }
 
+func (s *streamStateStore) HandleClosedPacket(sessionID uint8, streamID uint16, packetType uint8, sequenceNum uint16, now time.Time) (VpnProto.Packet, bool) {
+	if s == nil || streamID == 0 {
+		return VpnProto.Packet{}, false
+	}
+
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	if !s.isRecentlyClosedLocked(sessionID, streamID, now.UnixNano()) {
+		return VpnProto.Packet{}, false
+	}
+
+	packet := VpnProto.Packet{
+		StreamID:    streamID,
+		SequenceNum: sequenceNum,
+	}
+	switch packetType {
+	case Enums.PACKET_STREAM_FIN:
+		packet.PacketType = Enums.PACKET_STREAM_FIN_ACK
+		return packet, true
+	case Enums.PACKET_STREAM_RST:
+		packet.PacketType = Enums.PACKET_STREAM_RST_ACK
+		return packet, true
+	case Enums.PACKET_SOCKS5_SYN:
+		packet.PacketType = Enums.PACKET_SOCKS5_CONNECT_FAIL
+		packet.SequenceNum = 0
+		return packet, true
+	case Enums.PACKET_STREAM_SYN, Enums.PACKET_STREAM_DATA, Enums.PACKET_STREAM_RESEND, Enums.PACKET_STREAM_DATA_ACK:
+		packet.PacketType = Enums.PACKET_STREAM_RST
+		packet.SequenceNum = 0
+		return packet, true
+	default:
+		return VpnProto.Packet{}, false
+	}
+}
+
 func (s *streamStateStore) lookupLocked(sessionID uint8, streamID uint16) *streamStateRecord {
 	if streams, ok := s.sessions[sessionID]; ok {
 		return streams[streamID]
 	}
 	return nil
+}
+
+func (s *streamStateStore) noteClosedLocked(sessionID uint8, streamID uint16, nowUnix int64) {
+	if streamID == 0 {
+		return
+	}
+	closed := s.closed[sessionID]
+	if closed == nil {
+		closed = make(map[uint16]int64, 8)
+		s.closed[sessionID] = closed
+	}
+	expiredBefore := nowUnix - serverClosedStreamRecordTTL.Nanoseconds()
+	for closedID, closedAt := range closed {
+		if closedAt < expiredBefore {
+			delete(closed, closedID)
+		}
+	}
+	closed[streamID] = nowUnix
+	if len(closed) <= serverClosedStreamRecordCap {
+		return
+	}
+
+	var oldestID uint16
+	var oldestAt int64
+	first := true
+	for closedID, closedAt := range closed {
+		if first || closedAt < oldestAt {
+			oldestID = closedID
+			oldestAt = closedAt
+			first = false
+		}
+	}
+	delete(closed, oldestID)
+}
+
+func (s *streamStateStore) isRecentlyClosedLocked(sessionID uint8, streamID uint16, nowUnix int64) bool {
+	closed := s.closed[sessionID]
+	if len(closed) == 0 {
+		return false
+	}
+	closedAt, ok := closed[streamID]
+	if !ok {
+		return false
+	}
+	if nowUnix-closedAt <= serverClosedStreamRecordTTL.Nanoseconds() {
+		return true
+	}
+	delete(closed, streamID)
+	if len(closed) == 0 {
+		delete(s.closed, sessionID)
+	}
+	return false
 }
 
 func cloneStreamStateRecord(record *streamStateRecord) *streamStateRecord {

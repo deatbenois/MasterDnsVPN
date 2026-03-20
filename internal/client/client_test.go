@@ -1991,6 +1991,79 @@ func TestSelectTargetConnectionsForPacketUsesSetupDuplicationCount(t *testing.T)
 	}
 }
 
+func TestDeleteStreamTracksClosedStreamRecord(t *testing.T) {
+	c := New(config.ClientConfig{}, nil, nil)
+	stream := c.createStream(31, nil)
+
+	c.deleteStream(stream.ID)
+
+	if !c.isRecentlyClosedStream(stream.ID, time.Now()) {
+		t.Fatal("expected deleted stream to be tracked as recently closed")
+	}
+}
+
+func TestHandleClosedStreamPacketSendsOneWayResetForLateData(t *testing.T) {
+	codec, err := security.NewCodec(0, "")
+	if err != nil {
+		t.Fatalf("NewCodec returned error: %v", err)
+	}
+
+	c := New(config.ClientConfig{
+		PacketDuplicationCount: 1,
+		Domains:                []string{"v.example.com"},
+	}, nil, codec)
+	c.connections = []Connection{{
+		Domain:        "v.example.com",
+		Resolver:      "127.0.0.1",
+		ResolverPort:  5353,
+		ResolverLabel: "127.0.0.1:5353",
+		Key:           "127.0.0.1|5353|v.example.com",
+		IsValid:       true,
+	}}
+	c.connectionsByKey = map[string]int{c.connections[0].Key: 0}
+	c.rebuildBalancer()
+	c.sessionID = 7
+	c.sessionCookie = 9
+	c.sessionReady = true
+
+	stream := c.createStream(41, nil)
+	c.deleteStream(stream.ID)
+
+	var captured VpnProto.Packet
+	c.sendOneWayPacketFn = func(conn Connection, packet []byte, deadline time.Time) error {
+		parsed, err := DnsParser.ParsePacketLite(packet)
+		if err != nil {
+			t.Fatalf("ParsePacketLite returned error: %v", err)
+		}
+		if !parsed.HasQuestion {
+			t.Fatal("expected one-way stream query question")
+		}
+		captured, err = VpnProto.ParseFromLabels(extractTestTunnelLabels(parsed.FirstQuestion.Name, conn.Domain), c.codec)
+		if err != nil {
+			t.Fatalf("ParseFromLabels returned error: %v", err)
+		}
+		return nil
+	}
+
+	response, handled, err := c.handleClosedStreamPacket(VpnProto.Packet{
+		PacketType:  Enums.PACKET_STREAM_DATA,
+		StreamID:    41,
+		SequenceNum: 77,
+	}, time.Second)
+	if err != nil {
+		t.Fatalf("handleClosedStreamPacket returned error: %v", err)
+	}
+	if !handled {
+		t.Fatal("expected closed stream packet to be handled")
+	}
+	if response.PacketType != Enums.PACKET_STREAM_RST || response.StreamID != 41 || response.SequenceNum != 0 {
+		t.Fatalf("unexpected synthetic response: %+v", response)
+	}
+	if captured.PacketType != Enums.PACKET_STREAM_RST || captured.StreamID != 41 || captured.SequenceNum != 0 {
+		t.Fatalf("unexpected one-way reset packet: %+v", captured)
+	}
+}
+
 func extractTestTunnelLabels(qName string, baseDomain string) string {
 	suffix := "." + baseDomain
 	if len(qName) <= len(suffix) || qName[len(qName)-len(suffix):] != suffix {
