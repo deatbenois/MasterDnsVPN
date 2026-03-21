@@ -53,9 +53,8 @@ func (c *Client) sendQueuedRuntimePacket(packet arq.QueuedPacket) error {
 		return ErrTunnelDNSDispatchFailed
 	}
 
-	// Wake up ping manager if it's not a ping packet
 	if packet.PacketType != Enums.PACKET_PING {
-		c.pingManager.NotifyDataActivity()
+		c.pingManager.NotifyMeaningfulActivity()
 	}
 
 	var (
@@ -134,7 +133,7 @@ func (c *Client) sendQueuedMainPacketOneWay(connection Connection, packet arq.Qu
 	if err != nil {
 		return err
 	}
-	return c.sendRuntimeQuery(connection, query, deadline)
+	return c.sendRuntimeQuery(connection, query, packet.PacketType, deadline)
 }
 
 func (c *Client) sendQueuedStreamPacketOneWay(connection Connection, packet arq.QueuedPacket, deadline time.Time) error {
@@ -159,14 +158,14 @@ func (c *Client) sendQueuedStreamPacketOneWay(connection Connection, packet arq.
 		if buildErr != nil {
 			return buildErr
 		}
-		if err := c.sendRuntimeQuery(connection, query, deadline); err != nil {
+		if err := c.sendRuntimeQuery(connection, query, packet.PacketType, deadline); err != nil {
 			return err
 		}
 	}
 	return nil
 }
 
-func (c *Client) sendRuntimeQuery(connection Connection, query []byte, deadline time.Time) error {
+func (c *Client) sendRuntimeQuery(connection Connection, query []byte, packetType uint8, deadline time.Time) error {
 	if c == nil {
 		return ErrTunnelDNSDispatchFailed
 	}
@@ -189,13 +188,8 @@ func (c *Client) sendRuntimeQuery(connection Connection, query []byte, deadline 
 		}
 		return c.handleAsyncServerPacket(packet, timeout)
 	}
-	if c.sendOneWayPacketFn != nil {
-		if err := c.sendOneWayPacketFn(connection, query, deadline); err != nil {
-			return err
-		}
-		return nil
-	}
-	c.sendFastOneWayUDP(connection.ResolverLabel, query, deadline)
+	// High-performance asynchronous path via worker pool (Parallel Writers)
+	c.SendBurstPacket(connection, query, packetType)
 	return nil
 }
 

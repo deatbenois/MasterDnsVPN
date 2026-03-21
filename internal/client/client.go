@@ -138,8 +138,9 @@ type asyncReadPacket struct {
 }
 
 type asyncPacket struct {
-	conn    Connection
-	payload []byte
+	conn       Connection
+	payload    []byte
+	packetType uint8
 }
 
 const (
@@ -166,7 +167,6 @@ type clientStream struct {
 	NextSequence         uint16
 	LocalFinSent         bool
 	LocalFinSeq          uint16
-	LocalFinAcked        bool
 	RemoteFinRecv        bool
 	ResetSent            bool
 	Closed               bool
@@ -183,13 +183,9 @@ type clientStream struct {
 	ResolverResendStreak int
 	LastResolverFailover time.Time
 	TXQueue              []clientStreamTXPacket
-	TXInFlight           []clientStreamTXPacket
 	TXWake               chan struct{}
 	StopCh               chan struct{}
 	stopOnce             sync.Once
-	retryBase            time.Duration
-	srtt                 time.Duration
-	rttVar               time.Duration
 	arqWindowSize        int
 }
 
@@ -440,6 +436,7 @@ func (c *Client) MaxPackedBlocks() int {
 }
 
 func (c *Client) ResetRuntimeState(resetSessionCookie bool) {
+	c.StopAsyncRuntime()
 	c.enqueueSeq = 0
 	c.mainSequence = 0
 	c.lastStreamID = 0
@@ -935,7 +932,7 @@ func (c *Client) hasActiveStreamTXWork() bool {
 			continue
 		}
 		stream.mu.Lock()
-		hasWork := len(stream.TXQueue) != 0 || len(stream.TXInFlight) != 0
+		hasWork := len(stream.TXQueue) != 0
 		stream.mu.Unlock()
 		if hasWork {
 			return true
@@ -953,7 +950,7 @@ func clientStreamQuiescent(stream *clientStream) bool {
 	if stream.Closed {
 		return true
 	}
-	if len(stream.TXQueue) != 0 || len(stream.TXInFlight) != 0 {
+	if len(stream.TXQueue) != 0 {
 		return false
 	}
 	if stream.ResetSent {

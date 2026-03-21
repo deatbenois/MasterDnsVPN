@@ -203,9 +203,10 @@ func (c *Client) handleInboundPacket(data []byte, addr *net.UDPAddr) {
 		return
 	}
 
-	// 3. Adaptive Ping Logic: Wake up for non-PONG data
-	if vpnPacket.PacketType != Enums.PACKET_PONG {
-		c.pingManager.NotifyDataActivity()
+	if vpnPacket.PacketType == Enums.PACKET_PONG {
+		c.pingManager.NotifyPongReceived()
+	} else {
+		c.pingManager.NotifyMeaningfulActivity()
 	}
 
 	// 4. Dispatch to Session/Stream handler
@@ -226,14 +227,12 @@ func (c *Client) handleInboundPacket(data []byte, addr *net.UDPAddr) {
 }
 
 // SendBurstPacket adds a packet to the transmission queue.
-func (c *Client) SendBurstPacket(conn Connection, payload []byte) {
-	// Wake up ping manager only if it's not a ping (avoid loop)
-	if len(payload) > 0 && payload[0] != byte(Enums.PACKET_PING) {
-		c.pingManager.NotifyDataActivity()
+func (c *Client) SendBurstPacket(conn Connection, payload []byte, packetType uint8) {
+	if packetType != Enums.PACKET_PING {
+		c.pingManager.NotifyMeaningfulActivity()
 	}
 	select {
-	case c.txChannel <- asyncPacket{conn: conn, payload: payload}:
+	case c.txChannel <- asyncPacket{conn: conn, payload: payload, packetType: packetType}:
 	default:
-		// Drop packet if queue is full.
 	}
 }

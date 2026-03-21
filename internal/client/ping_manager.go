@@ -8,18 +8,21 @@ import (
 )
 
 const (
-	pingAggressiveInterval = 300 * time.Millisecond // Normal/Busy: 0.3s
-	pingLazyInterval       = 1 * time.Second        // Idle > 5s: 1s
-	pingCoolDownInterval   = 3 * time.Second        // Idle > 10s: 3s
-	pingColdInterval       = 30 * time.Second       // Idle > 35s: 30s
+	pingAggressiveInterval = 300 * time.Millisecond
+	pingLazyInterval       = 1 * time.Second
+	pingCoolDownInterval   = 3 * time.Second
+	pingColdInterval       = 30 * time.Second
+	pingWarmThreshold      = 5 * time.Second
+	pingCoolThreshold      = 10 * time.Second
+	pingColdThreshold      = 20 * time.Second
+	pingPongFreshWindow    = 2 * time.Second
 )
 
-// PingManager handles the adaptive keep-alive ping logic.
-// It adjusts frequency based on real data traffic (non-PING/PONG).
 type PingManager struct {
-	client           *Client
-	lastDataActivity atomic.Int64 // UnixNano
-	lastPingTime     atomic.Int64 // UnixNano
+	client                 *Client
+	lastMeaningfulActivity atomic.Int64
+	lastPingSentAt         atomic.Int64
+	lastPongReceivedAt     atomic.Int64
 
 	ctx    context.Context
 	cancel context.CancelFunc
@@ -33,8 +36,9 @@ func newPingManager(client *Client) *PingManager {
 		client: client,
 		wakeCh: make(chan struct{}, 1),
 	}
-	p.lastDataActivity.Store(now)
-	p.lastPingTime.Store(now)
+	p.lastMeaningfulActivity.Store(now)
+	p.lastPingSentAt.Store(now)
+	p.lastPongReceivedAt.Store(now)
 	return p
 }
 
@@ -56,18 +60,59 @@ func (p *PingManager) Stop() {
 	}
 }
 
-// NotifyDataActivity tells the manager that real business data was exchanged.
-// This forces the manager into Aggressive mode and wakes it up.
-func (p *PingManager) NotifyDataActivity() {
+func (p *PingManager) NotifyMeaningfulActivity() {
 	if p == nil {
 		return
 	}
-	p.lastDataActivity.Store(time.Now().UnixNano())
-
-	// Wake up the loop immediately if it's sleeping for a long interval.
+	p.lastMeaningfulActivity.Store(time.Now().UnixNano())
 	select {
 	case p.wakeCh <- struct{}{}:
 	default:
+	}
+}
+
+func (p *PingManager) NotifyPingSent() {
+	if p == nil {
+		return
+	}
+	p.lastPingSentAt.Store(time.Now().UnixNano())
+}
+
+func (p *PingManager) NotifyPongReceived() {
+	if p == nil {
+		return
+	}
+	p.lastPongReceivedAt.Store(time.Now().UnixNano())
+}
+
+func (p *PingManager) onlyPingPongActive(now time.Time, meaningfulAt time.Time) bool {
+	lastPing := time.Unix(0, p.lastPingSentAt.Load())
+	lastPong := time.Unix(0, p.lastPongReceivedAt.Load())
+	if lastPing.Before(meaningfulAt) || lastPong.Before(meaningfulAt) {
+		return false
+	}
+	if now.Sub(lastPing) > pingPongFreshWindow || now.Sub(lastPong) > pingPongFreshWindow {
+		return false
+	}
+	return true
+}
+
+func (p *PingManager) nextInterval(now time.Time) time.Duration {
+	meaningfulAt := time.Unix(0, p.lastMeaningfulActivity.Load())
+	if !p.onlyPingPongActive(now, meaningfulAt) {
+		return pingAggressiveInterval
+	}
+
+	idleTime := now.Sub(meaningfulAt)
+	switch {
+	case idleTime < pingWarmThreshold:
+		return pingAggressiveInterval
+	case idleTime < pingCoolThreshold:
+		return pingLazyInterval
+	case idleTime < pingColdThreshold:
+		return pingCoolDownInterval
+	default:
+		return pingColdInterval
 	}
 }
 
@@ -89,35 +134,16 @@ func (p *PingManager) pingLoop() {
 		}
 
 		now := time.Now()
-		lastActivity := time.Unix(0, p.lastDataActivity.Load())
-		idleTime := now.Sub(lastActivity)
-
-		// 1. Determine the interval based on idle time.
-		var interval time.Duration
-		switch {
-		case idleTime < 5*time.Second:
-			interval = pingAggressiveInterval
-		case idleTime < 10*time.Second:
-			interval = pingLazyInterval
-		case idleTime < 35*time.Second:
-			interval = pingCoolDownInterval
-		default:
-			interval = pingColdInterval
-		}
-
-		// 2. Check if it's time to ping.
-		lastPing := time.Unix(0, p.lastPingTime.Load())
+		interval := p.nextInterval(now)
+		lastPing := time.Unix(0, p.lastPingSentAt.Load())
 		if now.Sub(lastPing) >= interval {
 			if p.client.SessionReady() {
-				// We use stream0's existing QueuePing to put the packet into ARQ.
 				if p.client.stream0Runtime != nil && p.client.stream0Runtime.QueuePing() {
-					p.lastPingTime.Store(now.UnixNano())
+					p.NotifyPingSent()
 				}
 			}
 		}
 
-		// 3. Reset timer for next check.
-		// If we are idle, we check less frequently to save CPU.
 		checkInterval := interval / 2
 		if checkInterval < 100*time.Millisecond {
 			checkInterval = 100 * time.Millisecond

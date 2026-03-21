@@ -74,16 +74,10 @@ func (c *Client) applyClientACKState(packet VpnProto.Packet) {
 		if stream, ok := c.getStream(packet.StreamID); ok {
 			if packet.PacketType == Enums.PACKET_STREAM_FIN_ACK {
 				c.clearStreamControlState(Enums.PACKET_STREAM_FIN, packet.StreamID, packet.SequenceNum)
-				stream.mu.Lock()
-				if stream.LocalFinSent && stream.LocalFinSeq == packet.SequenceNum {
-					stream.LocalFinAcked = true
-				}
-				stream.mu.Unlock()
 			}
 			if packet.PacketType == Enums.PACKET_STREAM_RST_ACK {
 				c.clearStreamControlState(Enums.PACKET_STREAM_RST, packet.StreamID, packet.SequenceNum)
 			}
-			ackClientStreamTXWithLog(c, stream, packet.SequenceNum, time.Now())
 			notifyStreamWake(stream)
 			if packet.PacketType == Enums.PACKET_STREAM_FIN_ACK && streamFinished(stream) {
 				c.deleteStream(stream.ID)

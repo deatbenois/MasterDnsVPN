@@ -1,10 +1,3 @@
-// ==============================================================================
-// MasterDnsVPN
-// Author: MasterkinG32
-// Github: https://github.com/masterking32
-// Year: 2026
-// ==============================================================================
-
 package client
 
 import (
@@ -20,9 +13,6 @@ import (
 )
 
 const maxClientStreamFollowUps = 16
-const streamTXInitialRetryDelay = 800 * time.Millisecond
-const streamTXMaxRetryDelay = 2 * time.Second
-const streamTXMinRetryDelay = 120 * time.Millisecond
 
 var ErrClientStreamClosed = errors.New("client stream closed")
 var ErrClientStreamBackpressure = errors.New("client stream send queue full")
@@ -35,10 +25,8 @@ func (c *Client) createStream(streamID uint16, conn net.Conn) *clientStream {
 		NextSequence:   2,
 		LastActivityAt: now,
 		TXQueue:        make([]clientStreamTXPacket, 0, 8),
-		TXInFlight:     make([]clientStreamTXPacket, 0, c.effectiveStreamTXWindow()),
 		TXWake:         make(chan struct{}, 1),
 		StopCh:         make(chan struct{}),
-		retryBase:      streamTXInitialRetryDelay,
 		arqWindowSize:  c.arqWindowSize,
 		log:            c.log,
 	}
@@ -222,7 +210,7 @@ func (c *Client) handleInboundStreamPacket(packet VpnProto.Packet, timeout time.
 	case Enums.PACKET_STREAM_DATA:
 		if c.log != nil && len(packet.Payload) != 0 {
 			c.log.Debugf(
-				"ðŸ“¥ <blue>Inbound Stream Data, Stream ID: <cyan>%d</cyan> | Seq: <cyan>%d</cyan> | Bytes: <cyan>%d</cyan></blue>",
+				"📥 <blue>Inbound Stream Data, Stream ID: <cyan>%d</cyan> | Seq: <cyan>%d</cyan> | Bytes: <cyan>%d</cyan></blue>",
 				stream.ID,
 				packet.SequenceNum,
 				len(packet.Payload),
@@ -236,40 +224,8 @@ func (c *Client) handleInboundStreamPacket(packet VpnProto.Packet, timeout time.
 		if !ready {
 			return VpnProto.Packet{}, nil
 		}
-		stream.mu.Lock()
-		if !stream.InboundNextSet {
-			stream.InboundNextSeq = 1
-			stream.InboundNextSet = true
-		}
-		lastDelivered := stream.InboundNextSeq - 1
-		if stream.InboundNextSeq == 0 {
-			lastDelivered = 0xFFFF
-		}
-		if stream.InboundDataSet && streamutil.SequenceSeenOrOlder(lastDelivered, packet.SequenceNum) {
-			stream.mu.Unlock()
-			return c.sendStreamAckOneWay(Enums.PACKET_STREAM_DATA_ACK, stream.ID, packet.SequenceNum)
-		}
-		diff := uint16(packet.SequenceNum - stream.InboundNextSeq)
-		if diff > uint16(stream.arqWindowSize) {
-			stream.mu.Unlock()
-			return VpnProto.Packet{}, nil
-		}
-		if stream.InboundPending == nil {
-			stream.InboundPending = make(map[uint16][]byte, 8)
-		}
-		if _, exists := stream.InboundPending[packet.SequenceNum]; !exists {
-			if len(stream.InboundPending) < stream.arqWindowSize {
-				stream.InboundPending[packet.SequenceNum] = assembled
-			}
-		}
-		readyPayloads := drainClientInboundReadyChunks(stream)
-		shouldCloseAfterData := stream.RemoteFinSet && stream.InboundNextSet && stream.InboundNextSeq == stream.RemoteFinSeq
-		stream.mu.Unlock()
-		for _, readyPayload := range readyPayloads {
-			if len(readyPayload) == 0 {
-				continue
-			}
-			if _, err := stream.Conn.Write(readyPayload); err != nil {
+		if len(assembled) != 0 {
+			if _, err := stream.Conn.Write(assembled); err != nil {
 				if c.log != nil {
 					c.log.Warnf(
 						"🧦 <yellow>Local Stream Write Failed, Stream ID: <cyan>%d</cyan> | Error: <cyan>%v</cyan></yellow>",
@@ -287,13 +243,10 @@ func (c *Client) handleInboundStreamPacket(packet VpnProto.Packet, timeout time.
 				return VpnProto.Packet{}, nil
 			}
 		}
-
-		if shouldCloseAfterData {
-			streamutil.CloseWrite(stream.Conn)
-			if streamFinished(stream) {
-				c.deleteStream(stream.ID)
-			}
-		}
+		stream.mu.Lock()
+		stream.InboundDataSeq = packet.SequenceNum
+		stream.InboundDataSet = true
+		stream.mu.Unlock()
 		return c.sendStreamAckOneWay(Enums.PACKET_STREAM_DATA_ACK, stream.ID, packet.SequenceNum)
 	case Enums.PACKET_STREAM_FIN:
 		c.noteStreamProgress(stream.ID)
@@ -305,15 +258,10 @@ func (c *Client) handleInboundStreamPacket(packet VpnProto.Packet, timeout time.
 		stream.RemoteFinSeq = packet.SequenceNum
 		stream.RemoteFinSet = true
 		stream.RemoteFinRecv = true
-
-		shouldClose := stream.InboundNextSet && stream.InboundNextSeq == stream.RemoteFinSeq
 		stream.mu.Unlock()
-
-		if shouldClose {
-			streamutil.CloseWrite(stream.Conn)
-			if streamFinished(stream) {
-				c.deleteStream(stream.ID)
-			}
+		streamutil.CloseWrite(stream.Conn)
+		if streamFinished(stream) {
+			c.deleteStream(stream.ID)
 		}
 		return c.sendStreamAckOneWay(Enums.PACKET_STREAM_FIN_ACK, stream.ID, packet.SequenceNum)
 	case Enums.PACKET_STREAM_RST:
@@ -334,7 +282,7 @@ func (c *Client) sendStreamAckOneWay(packetType uint8, streamID uint16, sequence
 	}
 	if c.log != nil {
 		c.log.Debugf(
-			"\U0001F4E8 <blue>Sending Stream ACK</blue> <magenta>|</magenta> <blue>Stream ID</blue>: <cyan>%d</cyan> <magenta>|</magenta> <blue>Packet</blue>: <cyan>%s</cyan> <magenta>|</magenta> <blue>Seq</blue>: <cyan>%d</cyan>",
+			"📨 <blue>Sending Stream ACK</blue> <magenta>|</magenta> <blue>Stream ID</blue>: <cyan>%d</cyan> <magenta>|</magenta> <blue>Packet</blue>: <cyan>%s</cyan> <magenta>|</magenta> <blue>Seq</blue>: <cyan>%d</cyan>",
 			streamID,
 			Enums.PacketTypeName(packetType),
 			sequenceNum,
@@ -349,6 +297,12 @@ func (c *Client) sendStreamProtocolOneWay(packetType uint8, streamID uint16, seq
 		return ErrClientStreamClosed
 	}
 	if !c.SessionReady() {
+		return ErrTunnelDNSDispatchFailed
+	}
+	if c.stream0Runtime != nil && c.stream0Runtime.IsRunning() {
+		if c.stream0Runtime.QueueStreamPacket(streamID, packetType, sequenceNum, payload) {
+			return nil
+		}
 		return ErrTunnelDNSDispatchFailed
 	}
 
@@ -385,7 +339,7 @@ func (c *Client) queueStreamPacket(stream *clientStream, packetType uint8, paylo
 	if packetType == Enums.PACKET_STREAM_RST && stream.ResetSent {
 		return nil
 	}
-	if packetType == Enums.PACKET_STREAM_DATA && c.effectiveStreamTXQueueLimit() > 0 && len(stream.TXQueue)+len(stream.TXInFlight) >= c.effectiveStreamTXQueueLimit() {
+	if packetType == Enums.PACKET_STREAM_DATA && c.effectiveStreamTXQueueLimit() > 0 && len(stream.TXQueue) >= c.effectiveStreamTXQueueLimit() {
 		return ErrClientStreamBackpressure
 	}
 
@@ -398,36 +352,30 @@ func (c *Client) queueStreamPacket(stream *clientStream, packetType uint8, paylo
 	if packetType == Enums.PACKET_STREAM_FIN {
 		stream.LocalFinSent = true
 		stream.LocalFinSeq = sequenceNum
-		stream.LocalFinAcked = false
 	}
 	if packetType == Enums.PACKET_STREAM_RST {
 		stream.ResetSent = true
 		clearClientStreamDataLocked(stream)
+		stream.Closed = true
 	}
-
-	// Optimization: Use Payload Pool for data packets to reduce allocations
-	p := arq.AllocPayload(payload)
 
 	packet := clientStreamTXPacket{
 		PacketType:  packetType,
 		SequenceNum: sequenceNum,
-		Payload:     p,
+		Payload:     arq.AllocPayload(payload),
 		CreatedAt:   stream.LastActivityAt,
-		RetryDelay:  streamRetryBaseLocked(stream),
 	}
 	stream.TXQueue = append(stream.TXQueue, packet)
 	queueLen := len(stream.TXQueue)
-	inFlightLen := len(stream.TXInFlight)
 	notifyStreamWake(stream)
 	if c.log != nil {
 		c.log.Debugf(
-			"ðŸ“¤ <blue>Queued Stream Packet, Stream ID: <cyan>%d</cyan> | Packet: <cyan>%s</cyan> | Seq: <cyan>%d</cyan> | Bytes: <cyan>%d</cyan> | Queue: <cyan>%d</cyan> | InFlight: <cyan>%d</cyan></blue>",
+			"📤 <blue>Queued Stream Packet, Stream ID: <cyan>%d</cyan> | Packet: <cyan>%s</cyan> | Seq: <cyan>%d</cyan> | Bytes: <cyan>%d</cyan> | Queue: <cyan>%d</cyan></blue>",
 			stream.ID,
 			Enums.PacketTypeName(packetType),
 			sequenceNum,
 			len(payload),
 			queueLen,
-			inFlightLen,
 		)
 	}
 	return nil
@@ -441,7 +389,7 @@ func (c *Client) runClientStreamTXLoop(stream *clientStream, timeout time.Durati
 		if recovered := recover(); recovered != nil {
 			if c.log != nil {
 				c.log.Errorf(
-					"ðŸ’¥ <red>Client Stream TX Loop Panic: <cyan>%v</cyan> (Stream ID: <cyan>%d</cyan>)</red>",
+					"💥 <red>Client Stream TX Loop Panic: <cyan>%v</cyan> (Stream ID: <cyan>%d</cyan>)</red>",
 					recovered,
 					stream.ID,
 				)
@@ -452,7 +400,6 @@ func (c *Client) runClientStreamTXLoop(stream *clientStream, timeout time.Durati
 	}()
 	timeout = normalizeTimeout(timeout, defaultRuntimeTimeout)
 
-	// Optimization: Use a single reusable timer for the loop lifecycle
 	waitTimer := time.NewTimer(time.Hour)
 	if !waitTimer.Stop() {
 		select {
@@ -463,13 +410,6 @@ func (c *Client) runClientStreamTXLoop(stream *clientStream, timeout time.Durati
 	defer waitTimer.Stop()
 
 	for {
-		if c.expireClientStreamTX(stream, time.Now()) {
-			if streamFinished(stream) {
-				c.deleteStream(stream.ID)
-				return
-			}
-			continue
-		}
 		packet, waitFor, shouldStop := nextClientStreamTX(stream, c.effectiveStreamTXWindow())
 		if shouldStop {
 			return
@@ -498,45 +438,31 @@ func (c *Client) runClientStreamTXLoop(stream *clientStream, timeout time.Durati
 				return
 			}
 		}
-
-		if c.stream0Runtime == nil || !c.stream0Runtime.IsRunning() {
-			packetType := packet.PacketType
-			if packetType == Enums.PACKET_STREAM_DATA && packet.RetryCount > 0 {
-				packetType = Enums.PACKET_STREAM_RESEND
-			}
-			sentAt := time.Now()
-			if err := c.sendStreamProtocolOneWay(packetType, stream.ID, packet.SequenceNum, packet.Payload, timeout); err != nil {
-				rescheduleClientStreamTX(stream, packet.SequenceNum)
-				continue
-			}
-			armClientStreamTXRetry(c, stream.ID, packet.SequenceNum, sentAt)
-			if streamFinished(stream) {
-				c.deleteStream(stream.ID)
-				return
-			}
-			continue
-		}
-		if !markClientStreamTXScheduled(stream, packet.SequenceNum) {
-			continue
-		}
 		packetType := packet.PacketType
-		if packetType == Enums.PACKET_STREAM_DATA && packet.RetryCount > 0 {
-			packetType = Enums.PACKET_STREAM_RESEND
-		}
 		if c.log != nil {
 			c.log.Debugf(
-				"ðŸ“¤ <blue>Dispatching Stream Packet, Stream ID: <cyan>%d</cyan> | Packet: <cyan>%s</cyan> | Seq: <cyan>%d</cyan> | Retry: <cyan>%d</cyan> | Bytes: <cyan>%d</cyan></blue>",
+				"🚀 <blue>Dispatching Stream Packet, Stream ID: <cyan>%d</cyan> | Packet: <cyan>%s</cyan> | Seq: <cyan>%d</cyan> | Bytes: <cyan>%d</cyan></blue>",
 				stream.ID,
 				Enums.PacketTypeName(packetType),
 				packet.SequenceNum,
-				packet.RetryCount,
 				len(packet.Payload),
 			)
 		}
-	if !c.stream0Runtime.QueueStreamPacket(stream.ID, packetType, packet.SequenceNum, packet.Payload) {
-			rescheduleClientStreamTX(stream, packet.SequenceNum)
+		if c.stream0Runtime != nil && c.stream0Runtime.IsRunning() {
+			if !c.stream0Runtime.QueueStreamPacket(stream.ID, packetType, packet.SequenceNum, packet.Payload) {
+				time.Sleep(25 * time.Millisecond)
+				continue
+			}
+		} else if err := c.sendStreamProtocolOneWay(packetType, stream.ID, packet.SequenceNum, packet.Payload, timeout); err != nil {
 			time.Sleep(25 * time.Millisecond)
 			continue
+		}
+		if packet.Payload != nil {
+			arq.FreePayload(packet.Payload)
+		}
+		if streamFinished(stream) {
+			c.deleteStream(stream.ID)
+			return
 		}
 	}
 }
@@ -547,180 +473,14 @@ func nextClientStreamTX(stream *clientStream, windowSize int) (*clientStreamTXPa
 	if stream.Closed {
 		return nil, 0, true
 	}
-	if windowSize < 1 {
-		windowSize = 1
-	}
-	now := time.Now()
-	for len(stream.TXInFlight) < windowSize && len(stream.TXQueue) != 0 {
-		packet := stream.TXQueue[0]
-		stream.TXQueue[0] = clientStreamTXPacket{}
-		stream.TXQueue = stream.TXQueue[1:]
-		if packet.RetryDelay <= 0 {
-			packet.RetryDelay = streamRetryBaseLocked(stream)
-		}
-		packet.RetryAt = now
-		packet.Scheduled = false
-		stream.TXInFlight = append(stream.TXInFlight, packet)
-		if stream.log != nil {
-			stream.log.Debugf("ðŸ“¤ <blue>TX Move to InFlight, Stream ID: <cyan>%d</cyan> | Seq: <cyan>%d</cyan> | InFlight: <cyan>%d/%d</cyan></blue>", stream.ID, packet.SequenceNum, len(stream.TXInFlight), windowSize)
-		}
-	}
-	if len(stream.TXInFlight) == 0 {
+	_ = windowSize
+	if len(stream.TXQueue) == 0 {
 		return nil, 0, false
 	}
-
-	selectedIdx := -1
-	minWait := time.Duration(-1)
-	for idx := range stream.TXInFlight {
-		if stream.TXInFlight[idx].Scheduled {
-			continue
-		}
-		waitFor := time.Until(stream.TXInFlight[idx].RetryAt)
-		if waitFor <= 0 {
-			selectedIdx = idx
-			minWait = 0
-			break
-		}
-		if minWait < 0 || waitFor < minWait {
-			minWait = waitFor
-		}
-	}
-	if selectedIdx < 0 {
-		return nil, minWait, false
-	}
-	packet := stream.TXInFlight[selectedIdx]
-	return &packet, minWait, false
-}
-
-func rescheduleClientStreamTX(stream *clientStream, sequenceNum uint16) {
-	if stream == nil {
-		return
-	}
-	stream.mu.Lock()
-	defer stream.mu.Unlock()
-	for idx := range stream.TXInFlight {
-		if stream.TXInFlight[idx].SequenceNum != sequenceNum {
-			continue
-		}
-		delay := stream.TXInFlight[idx].RetryDelay
-		if delay <= 0 {
-			delay = streamRetryBaseLocked(stream)
-		}
-		stream.TXInFlight[idx].Scheduled = false
-		stream.TXInFlight[idx].RetryAt = time.Now().Add(delay)
-		stream.TXInFlight[idx].RetryCount++
-		delay *= 2
-		if delay > streamTXMaxRetryDelay {
-			delay = streamTXMaxRetryDelay
-		}
-		stream.TXInFlight[idx].RetryDelay = delay
-		if stream.log != nil {
-			stream.log.Debugf("ðŸ”„ <yellow>TX Rescheduled, Stream ID: <cyan>%d</cyan> | Seq: <cyan>%d</cyan> | Retry: <cyan>%d</cyan></yellow>", stream.ID, sequenceNum, stream.TXInFlight[idx].RetryCount)
-		}
-		return
-	}
-}
-
-func armClientStreamTXRetry(c *Client, streamID uint16, sequenceNum uint16, sentAt time.Time) {
-	if c == nil || streamID == 0 {
-		return
-	}
-	stream, ok := c.getStream(streamID)
-	if !ok || stream == nil {
-		return
-	}
-	stream.mu.Lock()
-	defer stream.mu.Unlock()
-	for idx := range stream.TXInFlight {
-		if stream.TXInFlight[idx].SequenceNum != sequenceNum {
-			continue
-		}
-		delay := stream.TXInFlight[idx].RetryDelay
-		if delay <= 0 {
-			delay = streamRetryBaseLocked(stream)
-		}
-		stream.TXInFlight[idx].Scheduled = false
-		stream.TXInFlight[idx].LastSentAt = sentAt
-		stream.TXInFlight[idx].RetryAt = sentAt.Add(delay)
-		return
-	}
-}
-
-func markClientStreamTXScheduled(stream *clientStream, sequenceNum uint16) bool {
-	if stream == nil {
-		return false
-	}
-	stream.mu.Lock()
-	defer stream.mu.Unlock()
-	for idx := range stream.TXInFlight {
-		if stream.TXInFlight[idx].SequenceNum != sequenceNum {
-			continue
-		}
-		if stream.TXInFlight[idx].Scheduled {
-			return false
-		}
-		stream.TXInFlight[idx].Scheduled = true
-		stream.TXInFlight[idx].LastSentAt = time.Now()
-		return true
-	}
-	return false
-}
-
-func ackClientStreamTX(stream *clientStream, sequenceNum uint16, ackedAt time.Time) {
-	ackClientStreamTXWithLog(nil, stream, sequenceNum, ackedAt)
-}
-
-func logClientStreamACK(c *Client, stream *clientStream, packetType uint8, sequenceNum uint16, payloadLen int) {
-	if c == nil || c.log == nil || stream == nil {
-		return
-	}
-	c.log.Debugf(
-		"âœ… <green>Stream Packet ACKed, Stream ID: <cyan>%d</cyan> | Packet: <cyan>%s</cyan> | Seq: <cyan>%d</cyan> | Bytes: <cyan>%d</cyan></green>",
-		stream.ID,
-		Enums.PacketTypeName(packetType),
-		sequenceNum,
-		payloadLen,
-	)
-}
-
-func ackClientStreamTXWithLog(c *Client, stream *clientStream, sequenceNum uint16, ackedAt time.Time) {
-	if stream == nil {
-		return
-	}
-	stream.mu.Lock()
-	defer stream.mu.Unlock()
-	for idx := range stream.TXInFlight {
-		if stream.TXInFlight[idx].SequenceNum != sequenceNum {
-			continue
-		}
-		packetType := stream.TXInFlight[idx].PacketType
-		payloadLen := len(stream.TXInFlight[idx].Payload)
-		updateClientStreamRTO(stream, stream.TXInFlight[idx], ackedAt)
-		// Release payload back to pool
-		if stream.TXInFlight[idx].Payload != nil {
-			arq.FreePayload(stream.TXInFlight[idx].Payload)
-		}
-		copy(stream.TXInFlight[idx:], stream.TXInFlight[idx+1:])
-		lastIdx := len(stream.TXInFlight) - 1
-		stream.TXInFlight[lastIdx] = clientStreamTXPacket{}
-		stream.TXInFlight = stream.TXInFlight[:lastIdx]
-		logClientStreamACK(c, stream, packetType, sequenceNum, payloadLen)
-		return
-	}
-}
-
-func ackClientStreamTXByResponse(stream *clientStream, sentPacketType uint8, response VpnProto.Packet, ackedAt time.Time) bool {
-	if stream == nil {
-		return false
-	}
-	if !matchesClientStreamAck(sentPacketType, response.PacketType) {
-		return false
-	}
-	if response.StreamID != stream.ID {
-		return false
-	}
-	ackClientStreamTX(stream, response.SequenceNum, ackedAt)
-	return true
+	packet := stream.TXQueue[0]
+	stream.TXQueue[0] = clientStreamTXPacket{}
+	stream.TXQueue = stream.TXQueue[1:]
+	return &packet, 0, false
 }
 
 func notifyStreamWake(stream *clientStream) {
@@ -738,7 +498,7 @@ func (c *Client) runLocalStreamReadLoop(stream *clientStream, timeout time.Durat
 		if recovered := recover(); recovered != nil {
 			if c.log != nil {
 				c.log.Errorf(
-					"ðŸ’¥ <red>Client Stream Read Loop Panic: <cyan>%v</cyan> (Stream ID: <cyan>%d</cyan>)</red>",
+					"💥 <red>Client Stream Read Loop Panic: <cyan>%v</cyan> (Stream ID: <cyan>%d</cyan>)</red>",
 					recovered,
 					stream.ID,
 				)
@@ -808,10 +568,10 @@ func streamFinished(stream *clientStream) bool {
 	if stream.ResetSent {
 		return false
 	}
-	if !stream.LocalFinSent || !stream.LocalFinAcked || !stream.RemoteFinRecv {
+	if !stream.LocalFinSent || !stream.RemoteFinRecv {
 		return false
 	}
-	return len(stream.TXQueue) == 0 && len(stream.TXInFlight) == 0
+	return len(stream.TXQueue) == 0
 }
 
 func matchesClientStreamAck(sentType uint8, ackType uint8) bool {
@@ -882,111 +642,4 @@ func clearClientStreamDataLocked(stream *clientStream) {
 		}
 		stream.TXQueue = filteredQueue
 	}
-	if len(stream.TXInFlight) != 0 {
-		filteredInFlight := stream.TXInFlight[:0]
-		for _, packet := range stream.TXInFlight {
-			if packet.PacketType == Enums.PACKET_STREAM_RST {
-				filteredInFlight = append(filteredInFlight, packet)
-			} else if packet.Payload != nil {
-				arq.FreePayload(packet.Payload)
-			}
-		}
-		for idx := len(filteredInFlight); idx < len(stream.TXInFlight); idx++ {
-			stream.TXInFlight[idx] = clientStreamTXPacket{}
-		}
-		stream.TXInFlight = filteredInFlight
-	}
 }
-
-func (c *Client) expireClientStreamTX(stream *clientStream, now time.Time) bool {
-	if c == nil || stream == nil {
-		return false
-	}
-
-	stream.mu.Lock()
-	defer stream.mu.Unlock()
-
-	if stream.Closed || len(stream.TXInFlight) == 0 {
-		return false
-	}
-
-	maxRetries := c.effectiveStreamTXMaxRetries()
-	ttl := c.effectiveStreamTXTTL()
-	for _, packet := range stream.TXInFlight {
-		if packet.RetryCount < maxRetries && now.Sub(packet.CreatedAt) < ttl {
-			continue
-		}
-
-		if packet.PacketType == Enums.PACKET_STREAM_RST || stream.ResetSent {
-			stream.Closed = true
-			clearClientStreamDataLocked(stream)
-			return true
-		}
-
-		stream.ResetSent = true
-		clearClientStreamDataLocked(stream)
-		stream.NextSequence++
-		if stream.NextSequence == 0 {
-			stream.NextSequence = 1
-		}
-		stream.TXQueue = append(stream.TXQueue, clientStreamTXPacket{
-			PacketType:  Enums.PACKET_STREAM_RST,
-			SequenceNum: stream.NextSequence,
-			CreatedAt:   now,
-			RetryDelay:  streamRetryBaseLocked(stream),
-		})
-		notifyStreamWake(stream)
-		return true
-	}
-
-	return false
-}
-
-func streamRetryBaseLocked(stream *clientStream) time.Duration {
-	if stream == nil || stream.retryBase <= 0 {
-		return streamTXInitialRetryDelay
-	}
-	if stream.retryBase < streamTXMinRetryDelay {
-		return streamTXMinRetryDelay
-	}
-	if stream.retryBase > streamTXMaxRetryDelay {
-		return streamTXMaxRetryDelay
-	}
-	return stream.retryBase
-}
-
-func updateClientStreamRTO(stream *clientStream, packet clientStreamTXPacket, ackedAt time.Time) {
-	if stream == nil || packet.RetryCount != 0 || packet.LastSentAt.IsZero() {
-		return
-	}
-	sample := ackedAt.Sub(packet.LastSentAt)
-	if sample <= 0 {
-		return
-	}
-	if sample < streamTXMinRetryDelay {
-		sample = streamTXMinRetryDelay
-	}
-	if sample > streamTXMaxRetryDelay {
-		sample = streamTXMaxRetryDelay
-	}
-	if stream.srtt <= 0 {
-		stream.srtt = sample
-		stream.rttVar = sample / 2
-	} else {
-		diff := stream.srtt - sample
-		if diff < 0 {
-			diff = -diff
-		}
-		stream.rttVar = (3*stream.rttVar + diff) / 4
-		stream.srtt = (7*stream.srtt + sample) / 8
-	}
-	rto := stream.srtt + 4*stream.rttVar
-	if rto < streamTXMinRetryDelay {
-		rto = streamTXMinRetryDelay
-	}
-	if rto > streamTXMaxRetryDelay {
-		rto = streamTXMaxRetryDelay
-	}
-	stream.retryBase = rto
-}
-

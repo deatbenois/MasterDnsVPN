@@ -86,6 +86,9 @@ func (c *Client) initializeSessionOnce() error {
 		c.clearSessionInitBusyUntil()
 		c.resetSessionInitState()
 		c.clearSessionResetPending()
+		if c.stream0Runtime != nil && c.stream0Runtime.ctx != nil {
+			_ = c.StartAsyncRuntime(c.stream0Runtime.ctx)
+		}
 		return nil
 	default:
 		return ErrSessionInitFailed
