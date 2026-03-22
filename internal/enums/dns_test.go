@@ -16,8 +16,8 @@ func TestPacketEnumValuesAreStable(t *testing.T) {
 	if PACKET_STREAM_DATA != 0x0B {
 		t.Fatalf("unexpected PACKET_STREAM_DATA value: got=%#x want=%#x", PACKET_STREAM_DATA, 0x0B)
 	}
-	if PACKET_DNS_QUERY_REQ != 0x29 {
-		t.Fatalf("unexpected PACKET_DNS_QUERY_REQ value: got=%#x want=%#x", PACKET_DNS_QUERY_REQ, 0x29)
+	if PACKET_DNS_QUERY_REQ != 0x2B {
+		t.Fatalf("unexpected PACKET_DNS_QUERY_REQ value: got=%#x want=%#x", PACKET_DNS_QUERY_REQ, 0x2B)
 	}
 	if PACKET_ERROR_DROP != 0xFF {
 		t.Fatalf("unexpected PACKET_ERROR_DROP value: got=%#x want=%#x", PACKET_ERROR_DROP, 0xFF)

@@ -27,12 +27,12 @@ func TestControlAckPairsCoversAllAckedControlPackets(t *testing.T) {
 		Enums.PACKET_SOCKS5_CONNECTED:                Enums.PACKET_SOCKS5_CONNECTED_ACK,
 	}
 
-	if len(ControlAckPairs) != len(expectedPairs) {
-		t.Fatalf("unexpected control ack pair count: got %d want %d", len(ControlAckPairs), len(expectedPairs))
+	if len(Enums.ControlAckPairs) != len(expectedPairs) {
+		t.Fatalf("unexpected control ack pair count: got %d want %d", len(Enums.ControlAckPairs), len(expectedPairs))
 	}
 
 	for packetType, ackType := range expectedPairs {
-		got, ok := ControlAckPairs[packetType]
+		got, ok := Enums.ControlAckPairs[packetType]
 		if !ok {
 			t.Fatalf("missing ack pair for packet type 0x%02X", packetType)
 		}

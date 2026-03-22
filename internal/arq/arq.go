@@ -72,39 +72,9 @@ type arqControlItem struct {
 	CurrentRTO     time.Duration
 }
 
-// ControlAckPairs maps requests to their exact ACK responses from Python
-var ControlAckPairs = map[uint8]uint8{
-	Enums.PACKET_DNS_QUERY_REQ:                   Enums.PACKET_DNS_QUERY_REQ_ACK,
-	Enums.PACKET_DNS_QUERY_RES:                   Enums.PACKET_DNS_QUERY_RES_ACK,
-	Enums.PACKET_STREAM_SYN:                      Enums.PACKET_STREAM_SYN_ACK,
-	Enums.PACKET_STREAM_FIN:                      Enums.PACKET_STREAM_FIN_ACK,
-	Enums.PACKET_STREAM_RST:                      Enums.PACKET_STREAM_RST_ACK,
-	Enums.PACKET_SOCKS5_SYN:                      Enums.PACKET_SOCKS5_SYN_ACK,
-	Enums.PACKET_SOCKS5_CONNECT_FAIL:             Enums.PACKET_SOCKS5_CONNECT_FAIL_ACK,
-	Enums.PACKET_SOCKS5_RULESET_DENIED:           Enums.PACKET_SOCKS5_RULESET_DENIED_ACK,
-	Enums.PACKET_SOCKS5_NETWORK_UNREACHABLE:      Enums.PACKET_SOCKS5_NETWORK_UNREACHABLE_ACK,
-	Enums.PACKET_SOCKS5_HOST_UNREACHABLE:         Enums.PACKET_SOCKS5_HOST_UNREACHABLE_ACK,
-	Enums.PACKET_SOCKS5_CONNECTION_REFUSED:       Enums.PACKET_SOCKS5_CONNECTION_REFUSED_ACK,
-	Enums.PACKET_SOCKS5_TTL_EXPIRED:              Enums.PACKET_SOCKS5_TTL_EXPIRED_ACK,
-	Enums.PACKET_SOCKS5_COMMAND_UNSUPPORTED:      Enums.PACKET_SOCKS5_COMMAND_UNSUPPORTED_ACK,
-	Enums.PACKET_SOCKS5_ADDRESS_TYPE_UNSUPPORTED: Enums.PACKET_SOCKS5_ADDRESS_TYPE_UNSUPPORTED_ACK,
-	Enums.PACKET_SOCKS5_AUTH_FAILED:              Enums.PACKET_SOCKS5_AUTH_FAILED_ACK,
-	Enums.PACKET_SOCKS5_UPSTREAM_UNAVAILABLE:     Enums.PACKET_SOCKS5_UPSTREAM_UNAVAILABLE_ACK,
-	Enums.PACKET_SOCKS5_CONNECTED:                Enums.PACKET_SOCKS5_CONNECTED_ACK,
-}
-
 var setupControlPacketTypes = map[uint8]bool{
 	Enums.PACKET_STREAM_SYN: true,
 	Enums.PACKET_SOCKS5_SYN: true,
-}
-
-var reverseControlAckPairs map[uint8]uint8
-
-func init() {
-	reverseControlAckPairs = make(map[uint8]uint8)
-	for k, v := range ControlAckPairs {
-		reverseControlAckPairs[v] = k
-	}
 }
 
 type ARQ struct {
@@ -169,9 +139,6 @@ type ARQ struct {
 	controlMaxRto            time.Duration
 	controlMaxRetries        int
 	controlPacketTTL         time.Duration
-
-	lastDupAckSn   *uint16
-	lastDupAckTime time.Time
 
 	// SOCKS pre-connection payload handling
 	isSocks           bool
@@ -798,8 +765,6 @@ func (a *ARQ) tryFinalizeRemoteEOF() {
 	// In Go, closing for write only is trickier, but if it supports CloseWrite, we can.
 	// We'll skip TCP half-close syscalls since net.Conn lacks it inherently without strict types, but it's safe to just ack.
 
-	go a.SendControlPacket(Enums.PACKET_STREAM_FIN_ACK, *a.finSeqReceived, 0, 0, nil, 0, false, nil)
-
 	if a.finSent && a.finAcked && len(a.sndBuf) == 0 {
 		go a.Close("Both FIN sides fully acknowledged", false)
 	}
@@ -903,22 +868,8 @@ func (a *ARQ) ReceiveData(sn uint16, data []byte) {
 	diff := sn - a.rcvNxt
 
 	if diff >= 32768 { // Negative diff equivalent in uint16, packet is old
-		ackThrottle := minF(a.rto.Seconds(), 0.3)
-
-		var emit bool
-		if a.lastDupAckSn != nil && *a.lastDupAckSn == sn && now.Sub(a.lastDupAckTime).Seconds() < ackThrottle {
-			emit = false
-		} else {
-			emSn := sn
-			a.lastDupAckSn = &emSn
-			a.lastDupAckTime = now
-			emit = true
-		}
 		a.mu.Unlock()
-
-		if emit {
-			a.enqueuer.PushTXPacket(Enums.DefaultPacketPriority(Enums.PACKET_STREAM_DATA_ACK), Enums.PACKET_STREAM_DATA_ACK, sn, 0, 0, 0, nil)
-		}
+		a.enqueuer.PushTXPacket(Enums.DefaultPacketPriority(Enums.PACKET_STREAM_DATA_ACK), Enums.PACKET_STREAM_DATA_ACK, sn, 0, 0, 0, nil)
 		return
 	}
 
@@ -977,7 +928,7 @@ func (a *ARQ) SendControlPacket(packetType uint8, sequenceNum uint16, fragmentID
 	if customAckType != nil {
 		expectedAck = *customAckType
 	} else {
-		val, ok := ControlAckPairs[packetType]
+		val, ok := Enums.ControlAckFor(packetType)
 		if !ok {
 			return true
 		}
@@ -1034,7 +985,7 @@ func (a *ARQ) ReceiveControlAck(ackPacketType uint8, sequenceNum uint16, fragmen
 		a.mu.Lock()
 	}
 
-	originPtype, ok := reverseControlAckPairs[ackPacketType]
+	originPtype, ok := Enums.ReverseControlAckFor(ackPacketType)
 	var cleared bool
 	// Note: Local DNS fragments from server are handled by fragmentstore,
 	// but control-plane fragments (like split DNS REQs) need matching keys.

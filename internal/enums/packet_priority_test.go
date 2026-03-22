@@ -7,7 +7,7 @@ func TestDefaultPacketPriorityMatchesCurrentBehavior(t *testing.T) {
 		PACKET_STREAM_DATA:             PacketPriorityNormal,
 		PACKET_STREAM_DATA_ACK:         PacketPriorityCritical,
 		PACKET_STREAM_RESEND:           PacketPriorityRetry,
-		PACKET_DNS_QUERY_REQ:           PacketPriorityNormal,
+		PACKET_DNS_QUERY_REQ:           PacketPriorityRetry,
 		PACKET_SOCKS5_SYN:              PacketPriorityCritical,
 		PACKET_STREAM_FIN:              PacketPriorityLow,
 		PACKET_STREAM_RST:              PacketPriorityCritical,

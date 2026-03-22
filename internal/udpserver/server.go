@@ -451,6 +451,9 @@ func (s *Server) handlePostSessionPacket(decision domainMatcher.Decision, vpnPac
 	if handled := s.handleClosedStreamPacket(vpnPacket); handled {
 		return true
 	}
+	if handled := s.preprocessInboundPacket(vpnPacket); handled {
+		return true
+	}
 
 	switch vpnPacket.PacketType {
 	case Enums.PACKET_PACKED_CONTROL_BLOCKS:
@@ -510,6 +513,91 @@ func (s *Server) enqueueMissingStreamReset(record *sessionRecord, vpnPacket VpnP
 		record.enqueueOrphanReset(Enums.PACKET_STREAM_RST, vpnPacket.StreamID, 0)
 	}
 	return true
+}
+
+func isStreamCreationPacketType(packetType uint8) bool {
+	switch packetType {
+	case Enums.PACKET_STREAM_SYN, Enums.PACKET_SOCKS5_SYN:
+		return true
+	default:
+		return false
+	}
+}
+
+func (s *Server) queueImmediateControlAck(record *sessionRecord, packet VpnProto.Packet) bool {
+	if s == nil || record == nil {
+		return false
+	}
+
+	ackType, ok := Enums.ControlAckFor(packet.PacketType)
+	if !ok {
+		return false
+	}
+
+	ackPacket := VpnProto.Packet{
+		PacketType:     ackType,
+		StreamID:       packet.StreamID,
+		SequenceNum:    packet.SequenceNum,
+		FragmentID:     packet.FragmentID,
+		TotalFragments: packet.TotalFragments,
+	}
+
+	if packet.StreamID == 0 {
+		return s.queueSessionPacket(record.ID, ackPacket)
+	}
+
+	stream, exists := record.getStream(packet.StreamID)
+	if (!exists || stream == nil) && isStreamCreationPacketType(packet.PacketType) {
+		stream = record.getOrCreateStream(packet.StreamID, arq.Config{}, nil, s.log)
+		exists = stream != nil
+	}
+	if !exists || stream == nil {
+		return false
+	}
+
+	return stream.PushTXPacket(
+		Enums.DefaultPacketPriority(ackType),
+		ackType,
+		packet.SequenceNum,
+		packet.FragmentID,
+		packet.TotalFragments,
+		0,
+		nil,
+	)
+}
+
+func (s *Server) preprocessInboundPacket(vpnPacket VpnProto.Packet) bool {
+	if s == nil {
+		return true
+	}
+
+	switch vpnPacket.PacketType {
+	case Enums.PACKET_STREAM_DATA, Enums.PACKET_STREAM_RESEND, Enums.PACKET_PACKED_CONTROL_BLOCKS:
+		return false
+	}
+
+	record, ok := s.sessions.Get(vpnPacket.SessionID)
+	if !ok {
+		return false
+	}
+
+	if vpnPacket.HasStreamID && vpnPacket.StreamID != 0 {
+		now := time.Now()
+		if isStreamCreationPacketType(vpnPacket.PacketType) && record.isRecentlyClosed(vpnPacket.StreamID, now) {
+			return s.enqueueMissingStreamReset(record, vpnPacket)
+		}
+		if !isStreamCreationPacketType(vpnPacket.PacketType) {
+			if _, exists := record.getStream(vpnPacket.StreamID); !exists {
+				return s.enqueueMissingStreamReset(record, vpnPacket)
+			}
+		}
+		if record.isRecentlyClosed(vpnPacket.StreamID, now) {
+			return s.enqueueMissingStreamReset(record, vpnPacket)
+		}
+	}
+
+	_ = s.queueImmediateControlAck(record, vpnPacket)
+	return false
 }
 
 func (s *Server) validatePostSessionPacket(questionPacket []byte, requestName string, vpnPacket VpnProto.Packet) postSessionValidation {
@@ -1135,6 +1223,10 @@ func (s *Server) handlePackedControlBlocksRequest(vpnPacket VpnProto.Packet, ses
 			FragmentID:     fragmentID,
 			TotalFragments: totalFragments,
 		}
+		if s.preprocessInboundPacket(block) {
+			handled = true
+			return true
+		}
 		if s.handlePackedPostSessionBlock(block, sessionRecord) {
 			handled = true
 		}
@@ -1210,13 +1302,6 @@ func (s *Server) processDeferredStreamSyn(vpnPacket VpnProto.Packet, sessionReco
 			if s.log != nil {
 				s.log.Debugf("🧦 <green>STREAM_SYN Fast-Ack (Existing), Session: <cyan>%d</cyan> | Stream: <cyan>%d</cyan></green>", vpnPacket.SessionID, vpnPacket.StreamID)
 			}
-			_ = s.queueSessionPacket(vpnPacket.SessionID, VpnProto.Packet{
-				PacketType:     Enums.PACKET_STREAM_SYN_ACK,
-				StreamID:       vpnPacket.StreamID,
-				SequenceNum:    vpnPacket.SequenceNum,
-				FragmentID:     0,
-				TotalFragments: 0,
-			})
 			return
 		}
 
@@ -1247,13 +1332,6 @@ func (s *Server) processDeferredStreamSyn(vpnPacket VpnProto.Packet, sessionReco
 		record.getOrCreateStream(vpnPacket.StreamID, arq.Config{}, nil, s.log)
 	}
 
-	_ = s.queueSessionPacket(vpnPacket.SessionID, VpnProto.Packet{
-		PacketType:     Enums.PACKET_STREAM_SYN_ACK,
-		StreamID:       vpnPacket.StreamID,
-		SequenceNum:    vpnPacket.SequenceNum,
-		FragmentID:     0,
-		TotalFragments: 0,
-	})
 }
 
 func (s *Server) processDeferredSOCKS5Syn(vpnPacket VpnProto.Packet, sessionRecord *sessionRuntimeView) {
@@ -1284,15 +1362,6 @@ func (s *Server) processDeferredSOCKS5Syn(vpnPacket VpnProto.Packet, sessionReco
 		totalFragments,
 		now,
 	)
-
-	// ACK every incoming SOCKS5_SYN fragment immediately, independent of final connect result.
-	_ = s.queueSessionPacket(vpnPacket.SessionID, VpnProto.Packet{
-		PacketType:     Enums.PACKET_SOCKS5_SYN_ACK,
-		StreamID:       vpnPacket.StreamID,
-		SequenceNum:    vpnPacket.SequenceNum,
-		FragmentID:     vpnPacket.FragmentID,
-		TotalFragments: totalFragments,
-	})
 
 	if completed || !ready {
 		return
@@ -1403,6 +1472,11 @@ func (s *Server) processDeferredStreamData(vpnPacket VpnProto.Packet, sessionRec
 
 	assembledPayload, ready, complete := s.collectStreamDataFragments(vpnPacket, now)
 	if complete {
+		_ = s.queueSessionPacket(vpnPacket.SessionID, VpnProto.Packet{
+			PacketType:  Enums.PACKET_STREAM_DATA_ACK,
+			StreamID:    vpnPacket.StreamID,
+			SequenceNum: vpnPacket.SequenceNum,
+		})
 		return
 	}
 	if !ready {
@@ -1432,14 +1506,6 @@ func (s *Server) handleDNSQueryRequest(decision domainMatcher.Decision, vpnPacke
 			decision.RequestName,
 		)
 	}
-	_ = s.queueMainSessionPacket(vpnPacket.SessionID, VpnProto.Packet{
-		PacketType:     Enums.PACKET_DNS_QUERY_REQ_ACK,
-		StreamID:       0,
-		SequenceNum:    vpnPacket.SequenceNum,
-		FragmentID:     vpnPacket.FragmentID,
-		TotalFragments: totalFragments,
-	})
-
 	assembledQuery, ready, completed := s.collectDNSQueryFragments(
 		vpnPacket.SessionID,
 		vpnPacket.SequenceNum,
@@ -1629,7 +1695,6 @@ func (s *Server) handleStreamRSTRequest(vpnPacket VpnProto.Packet, sessionRecord
 
 	s.removeSOCKS5SynFragmentsForStream(vpnPacket.SessionID, vpnPacket.StreamID)
 	s.removeStreamDataFragmentsForStream(vpnPacket.SessionID, vpnPacket.StreamID)
-	record.enqueueOrphanReset(Enums.PACKET_STREAM_RST_ACK, vpnPacket.StreamID, vpnPacket.SequenceNum)
 	return true
 }
 

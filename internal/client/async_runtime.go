@@ -263,7 +263,15 @@ func (c *Client) handleInboundPacket(data []byte, addr *net.UDPAddr) {
 		return
 	}
 
-	// 3. Dispatch to Packet Handlers via Registry
+	// 3. Queue deterministic non-data ACKs before any handler logic runs.
+	if handled := c.preprocessInboundPacket(vpnPacket); handled {
+		if c.log.Enabled(logger.LevelDebug) {
+			c.log.Debugf("\U0001F4E5 <cyan>Received Validated VPN Packet (Type: %d)</cyan>", vpnPacket.PacketType)
+		}
+		return
+	}
+
+	// 4. Dispatch to Packet Handlers via Registry
 	if err := handlers.Dispatch(c, vpnPacket, addr); err != nil {
 		c.log.Warnf("\U0001F6A8 <red>Handler execution failed: %v</red>", err)
 	}

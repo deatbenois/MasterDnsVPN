@@ -174,7 +174,6 @@ func (c *Client) HandleStreamPacket(packet VpnProto.Packet) error {
 		arqObj.ReceiveAck(packet.SequenceNum)
 	case Enums.PACKET_STREAM_RST:
 		arqObj.MarkRstReceived(packet.SequenceNum)
-		arqObj.SendControlPacket(Enums.PACKET_STREAM_RST_ACK, packet.SequenceNum, packet.FragmentID, packet.TotalFragments, nil, Enums.DefaultPacketPriority(Enums.PACKET_STREAM_RST_ACK), false, nil)
 		c.removeStream(packet.StreamID)
 	default:
 		// Handle generic control ACKs (acks to our SYN, etc.)

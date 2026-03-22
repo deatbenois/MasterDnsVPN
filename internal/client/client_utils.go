@@ -184,3 +184,61 @@ func (c *Client) handleMissingStreamPacket(packet VpnProto.Packet) {
 		c.enqueueOrphanReset(Enums.PACKET_STREAM_RST, packet.StreamID, 0)
 	}
 }
+
+func (c *Client) queueImmediateControlAck(streamID uint16, packet VpnProto.Packet) bool {
+	if c == nil {
+		return false
+	}
+
+	ackType, ok := Enums.ControlAckFor(packet.PacketType)
+	if !ok {
+		return false
+	}
+
+	c.streamsMu.RLock()
+	s := c.active_streams[streamID]
+	c.streamsMu.RUnlock()
+	if s == nil || s.txQueue == nil {
+		return false
+	}
+
+	return s.PushTXPacket(
+		Enums.DefaultPacketPriority(ackType),
+		ackType,
+		packet.SequenceNum,
+		packet.FragmentID,
+		packet.TotalFragments,
+		0,
+		nil,
+	)
+}
+
+func (c *Client) preprocessInboundPacket(packet VpnProto.Packet) bool {
+	if c == nil {
+		return true
+	}
+
+	switch packet.PacketType {
+	case Enums.PACKET_STREAM_DATA, Enums.PACKET_STREAM_RESEND:
+		return false
+	}
+
+	if packet.HasStreamID && packet.StreamID != 0 {
+		c.streamsMu.RLock()
+		_, ok := c.active_streams[packet.StreamID]
+		c.streamsMu.RUnlock()
+		if !ok {
+			c.handleMissingStreamPacket(packet)
+			return true
+		}
+
+		_ = c.queueImmediateControlAck(packet.StreamID, packet)
+		return false
+	}
+
+	if _, ok := Enums.ControlAckFor(packet.PacketType); ok {
+		_ = c.queueImmediateControlAck(0, packet)
+	}
+
+	return false
+}
