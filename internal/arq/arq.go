@@ -346,6 +346,15 @@ func (a *ARQ) SetIOReady(ready bool) {
 	}
 }
 
+// Done returns a channel that is closed when the ARQ context is cancelled or the stream is closed.
+func (a *ARQ) Done() <-chan struct{} {
+	return a.ctx.Done()
+}
+
+// ---------------------------------------------------------------------
+// Small Utilities
+// ---------------------------------------------------------------------
+
 func minF(x, y float64) float64 {
 	if x < y {
 		return x
@@ -374,6 +383,10 @@ func maxDuration(x, y time.Duration) time.Duration {
 	return y
 }
 
+// ---------------------------------------------------------------------
+// Flow Control & Shared State Helpers
+// ---------------------------------------------------------------------
+
 func (a *ARQ) signalWindowNotFull() {
 	select {
 	case a.windowNotFull <- struct{}{}:
@@ -396,6 +409,13 @@ func (a *ARQ) clearWindowNotFull() {
 	}
 }
 
+func (a *ARQ) signalFlushReady() {
+	select {
+	case a.flushSignal <- struct{}{}:
+	default:
+	}
+}
+
 // IsReset checks whether stream is explicitly in reset path
 func (a *ARQ) IsReset() bool {
 	a.mu.Lock()
@@ -406,6 +426,18 @@ func (a *ARQ) IsReset() bool {
 // setState atomically transitions the stream
 func (a *ARQ) setState(newState StreamState) {
 	a.state = newState
+}
+
+func (a *ARQ) finReceivedLocked() bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.finReceived
+}
+
+func (a *ARQ) isClosed() bool {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	return a.closed
 }
 
 // clearAllQueues is used to wipe state instantly (RST / Abort semantics)
@@ -645,17 +677,9 @@ func (a *ARQ) ioLoop() {
 	}
 }
 
-func (a *ARQ) finReceivedLocked() bool {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	return a.finReceived
-}
-
-func (a *ARQ) isClosed() bool {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	return a.closed
-}
+// ---------------------------------------------------------------------
+// Terminal Emit / Drain Helpers
+// ---------------------------------------------------------------------
 
 func (a *ARQ) deferTerminalPacket(reason string, packetType uint8) {
 	a.mu.Lock()
@@ -777,6 +801,10 @@ func (a *ARQ) emitTerminalPacketWithTTL(packetType uint8, reason string, ttl tim
 		a.mu.Unlock()
 	}
 }
+
+// ---------------------------------------------------------------------
+// Retransmit Scheduler
+// ---------------------------------------------------------------------
 
 func (a *ARQ) retransmitLoop() {
 	defer a.wg.Done()
@@ -934,13 +962,6 @@ func (a *ARQ) writeLoop() {
 				}
 			}
 		}
-	}
-}
-
-func (a *ARQ) signalFlushReady() {
-	select {
-	case a.flushSignal <- struct{}{}:
-	default:
 	}
 }
 
@@ -1108,6 +1129,10 @@ func (a *ARQ) HandleAckPacket(packetType uint8, sequenceNum uint16, fragmentID u
 
 	return a.ReceiveControlAck(packetType, sequenceNum, fragmentID)
 }
+
+// ---------------------------------------------------------------------
+// Retransmit Checks
+// ---------------------------------------------------------------------
 
 type rtxJob struct {
 	sn              uint16
@@ -1281,6 +1306,10 @@ func (a *ARQ) checkControlRetransmits(now time.Time) {
 	}
 }
 
+// ---------------------------------------------------------------------
+// Final Close Path
+// ---------------------------------------------------------------------
+
 func (a *ARQ) finalizeClose(reason string) {
 	a.mu.Lock()
 	if a.closed || a.isVirtual {
@@ -1394,9 +1423,4 @@ func (a *ARQ) Close(reason string, opts CloseOptions) {
 	}
 
 	a.emitTerminalPacketWithTTL(Enums.PACKET_STREAM_RST, reason, opts.TTL)
-}
-
-// Done returns a channel that is closed when the ARQ context is cancelled or the stream is closed.
-func (a *ARQ) Done() <-chan struct{} {
-	return a.ctx.Done()
 }
