@@ -118,97 +118,6 @@ type Client struct {
 	localDNSCacheFlushOnce sync.Once
 }
 
-func (c *Client) SessionReady() bool {
-	if c == nil {
-		return false
-	}
-	return c.sessionReady
-}
-
-func (c *Client) SessionID() uint8 {
-	return c.sessionID
-}
-
-func (c *Client) IsSessionReady() bool {
-	return c.SessionReady()
-}
-
-func (c *Client) ResponseMode() uint8 {
-	return c.responseMode
-}
-
-func (c *Client) Log() *logger.Logger {
-	return c.log
-}
-
-func (c *Client) NotifyPacket(packetType uint8, isInbound bool) {
-	if c.pingManager != nil {
-		c.pingManager.NotifyPacket(packetType, isInbound)
-	}
-}
-
-func (c *Client) HandleStreamPacket(packet VpnProto.Packet) error {
-	if !packet.HasStreamID {
-		return nil
-	}
-
-	c.streamsMu.Lock()
-	s, ok := c.active_streams[packet.StreamID]
-	c.streamsMu.Unlock()
-
-	if !ok || s == nil {
-		c.handleMissingStreamPacket(packet)
-		return nil
-	}
-
-	arqObj, ok := s.Stream.(*arq.ARQ)
-	if !ok {
-		return nil
-	}
-
-	switch packet.PacketType {
-	case Enums.PACKET_STREAM_DATA, Enums.PACKET_STREAM_RESEND:
-		arqObj.ReceiveData(packet.SequenceNum, packet.Payload)
-	case Enums.PACKET_STREAM_FIN:
-		arqObj.MarkFinReceived(packet.SequenceNum)
-	case Enums.PACKET_STREAM_RST:
-		arqObj.MarkRstReceived(packet.SequenceNum)
-		arqObj.Abort("peer reset received", false)
-		s.MarkTerminal(time.Now())
-		if s.StatusValue() != streamStatusCancelled {
-			s.SetStatus(streamStatusTimeWait)
-		}
-	default:
-		handledAck := arqObj.HandleAckPacket(packet.PacketType, packet.SequenceNum, packet.FragmentID)
-		if handledAck && (packet.PacketType == Enums.PACKET_STREAM_RST_ACK || packet.PacketType == Enums.PACKET_STREAM_FIN_ACK) {
-			if s.StatusValue() == streamStatusCancelled || arqObj.IsClosed() {
-				s.MarkTerminal(time.Now())
-				if s.StatusValue() != streamStatusCancelled {
-					s.SetStatus(streamStatusTimeWait)
-				}
-			}
-		}
-	}
-
-	return nil
-}
-
-func (c *Client) getStreamARQ(streamID uint16) (*arq.ARQ, error) {
-	c.streamsMu.Lock()
-	s, ok := c.active_streams[streamID]
-	c.streamsMu.Unlock()
-
-	if !ok || s == nil {
-		return nil, fmt.Errorf("stream not found")
-	}
-
-	arqObj, ok := s.Stream.(*arq.ARQ)
-	if !ok {
-		return nil, fmt.Errorf("stream is not ARQ")
-	}
-	return arqObj, nil
-}
-
 // clientStreamTXPacket represents a queued packet pending transmission or retransmission.
 type clientStreamTXPacket struct {
 	PacketType      uint8
@@ -327,103 +236,6 @@ func New(cfg config.ClientConfig, log *logger.Logger, codec *security.Codec) *Cl
 	return c
 }
 
-func (c *Client) Logger() *logger.Logger {
-	return c.log
-}
-
-func (c *Client) Balancer() *Balancer {
-	return c.balancer
-}
-
-func (c *Client) PrintBanner() {
-	if c.log == nil {
-		return
-	}
-
-	c.log.Infof("============================================================")
-	c.log.Infof("<magenta>Starting MasterDnsVPN Client...</magenta>")
-	// Build version skipped as per user request
-	c.log.Infof("<cyan>GitHub:</cyan> <blue>https://github.com/masterking32/MasterDnsVPN</blue>")
-	c.log.Infof("<cyan>Telegram:</cyan> <yellow>@MasterDnsVPN</yellow>")
-	c.log.Infof("============================================================")
-
-	c.log.Infof("🚀 <green>Client Configuration Loaded</green>")
-
-	c.log.Infof("🚀 <cyan>Client Mode, Protocol:</cyan> <yellow>%s</yellow> <cyan>Encryption:</cyan> <yellow>%d</yellow>", c.cfg.ProtocolType, c.cfg.DataEncryptionMethod)
-
-	strategyName := "Round-Robin"
-	switch c.cfg.ResolverBalancingStrategy {
-	case 0:
-		strategyName = "Round-Robin Default"
-	case 1:
-		strategyName = "Random"
-	case 2:
-		strategyName = "Round-Robin"
-	case 3:
-		strategyName = "Least Loss"
-	case 4:
-		strategyName = "Lowest Latency"
-	}
-	c.log.Infof("⚖  <cyan>Resolver Balancing, Strategy:</cyan> <yellow>%s (%d)</yellow>", strategyName, c.cfg.ResolverBalancingStrategy)
-
-	domainList := ""
-	if len(c.cfg.Domains) > 0 {
-		domainList = c.cfg.Domains[0]
-	}
-	c.log.Infof("🌐 <cyan>Configured Domains:</cyan> <yellow>%d (%s)</yellow>", len(c.cfg.Domains), domainList)
-	c.log.Infof("📡 <cyan>Loaded Resolvers:</cyan> <yellow>%d endpoints.</yellow>", len(c.cfg.Resolvers))
-}
-
-func (c *Client) Connections() []Connection {
-	return c.connections
-}
-
-// BuildConnectionMap iterates through all domains and resolvers in the configuration
-// and builds a comprehensive list of unique Connection objects.
-func (c *Client) BuildConnectionMap() error {
-	domains := c.cfg.Domains
-	resolvers := c.cfg.Resolvers
-
-	total := len(domains) * len(resolvers)
-	if total <= 0 {
-		return fmt.Errorf("Domains or Resolvers are missing in config.")
-	}
-
-	connections := make([]Connection, 0, total)
-	indexByKey := make(map[string]int, total)
-
-	for _, domain := range domains {
-		for _, resolver := range resolvers {
-			label := formatResolverEndpoint(resolver.IP, resolver.Port)
-			key := makeConnectionKey(resolver.IP, resolver.Port, domain)
-			if _, exists := indexByKey[key]; exists {
-				continue
-			}
-
-			indexByKey[key] = len(connections)
-			connections = append(connections, Connection{
-				Domain:        domain,
-				Resolver:      resolver.IP,
-				ResolverPort:  resolver.Port,
-				ResolverLabel: label,
-				Key:           key,
-				IsValid:       true,
-			})
-		}
-	}
-
-	c.connections = connections
-	c.connectionsByKey = indexByKey
-
-	pointers := make([]*Connection, len(c.connections))
-	for i := range c.connections {
-		pointers[i] = &c.connections[i]
-	}
-	c.balancer.SetConnections(pointers)
-
-	return nil
-}
-
 // Run starts the main execution loop of the client.
 func (c *Client) Run(ctx context.Context) error {
 	c.successMTUChecks = false
@@ -504,6 +316,52 @@ func (c *Client) Run(ctx context.Context) error {
 			}
 		}
 	}
+}
+
+func (c *Client) HandleStreamPacket(packet VpnProto.Packet) error {
+	if !packet.HasStreamID {
+		return nil
+	}
+
+	c.streamsMu.Lock()
+	s, ok := c.active_streams[packet.StreamID]
+	c.streamsMu.Unlock()
+
+	if !ok || s == nil {
+		c.handleMissingStreamPacket(packet)
+		return nil
+	}
+
+	arqObj, ok := s.Stream.(*arq.ARQ)
+	if !ok {
+		return nil
+	}
+
+	switch packet.PacketType {
+	case Enums.PACKET_STREAM_DATA, Enums.PACKET_STREAM_RESEND:
+		arqObj.ReceiveData(packet.SequenceNum, packet.Payload)
+	case Enums.PACKET_STREAM_FIN:
+		arqObj.MarkFinReceived(packet.SequenceNum)
+	case Enums.PACKET_STREAM_RST:
+		arqObj.MarkRstReceived(packet.SequenceNum)
+		arqObj.Abort("peer reset received", false)
+		s.MarkTerminal(time.Now())
+		if s.StatusValue() != streamStatusCancelled {
+			s.SetStatus(streamStatusTimeWait)
+		}
+	default:
+		handledAck := arqObj.HandleAckPacket(packet.PacketType, packet.SequenceNum, packet.FragmentID)
+		if handledAck && (packet.PacketType == Enums.PACKET_STREAM_RST_ACK || packet.PacketType == Enums.PACKET_STREAM_FIN_ACK) {
+			if s.StatusValue() == streamStatusCancelled || arqObj.IsClosed() {
+				s.MarkTerminal(time.Now())
+				if s.StatusValue() != streamStatusCancelled {
+					s.SetStatus(streamStatusTimeWait)
+				}
+			}
+		}
+	}
+
+	return nil
 }
 
 func (c *Client) HandleSessionReject(packet VpnProto.Packet) error {

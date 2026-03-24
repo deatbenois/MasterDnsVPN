@@ -31,7 +31,7 @@ func main() {
 
 	app.PrintBanner()
 
-	log := app.Logger()
+	log := app.Log()
 	if log != nil {
 		log.Infof("\U0001F680 <green>MasterDnsVPN Client Started</green>")
 		log.Infof("\U0001F4C4 <green>Configuration loaded from: <cyan>%s</cyan></green>", *configPath)

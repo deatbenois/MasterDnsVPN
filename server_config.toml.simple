@@ -41,8 +41,13 @@ DNS_CACHE_MAX_RECORDS = 2000
 DNS_CACHE_TTL_SECONDS = 3600.0
 
 # ------------------------------------------------------------------------------
-# 5) TCP Forward Mode
+# 5) Protocol & Forwarding Topology
 # ------------------------------------------------------------------------------
+
+# Must match client PROTOCOL_TYPE.
+# - "SOCKS5": optimized mode
+# - "TCP": raw TCP forwarding mode
+PROTOCOL_TYPE = "SOCKS5"
 
 SOCKS_CONNECT_TIMEOUT = 8.0
 USE_EXTERNAL_SOCKS5 = false
