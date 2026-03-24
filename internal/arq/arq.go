@@ -318,6 +318,7 @@ func (a *ARQ) SetLocalConn(conn io.ReadWriteCloser) {
 
 	if shouldStart {
 		a.startStreamWorkers()
+		a.signalFlushReady()
 	}
 }
 
@@ -527,6 +528,7 @@ func (a *ARQ) ioLoop() {
 
 	resetRequired := false
 	gracefulEOF := false
+	alreadyHandled := false
 	var errorReason string
 
 	buf := make([]byte, a.mtu)
@@ -537,6 +539,7 @@ func (a *ARQ) ioLoop() {
 		a.mu.Lock()
 		if a.stopLocalRead {
 			a.mu.Unlock()
+			alreadyHandled = true
 			break
 		}
 
@@ -552,6 +555,8 @@ func (a *ARQ) ioLoop() {
 
 		if a.localConn == nil {
 			a.mu.Unlock()
+			errorReason = "Local connection missing"
+			resetRequired = true
 			break
 		}
 		a.mu.Unlock()
@@ -609,39 +614,18 @@ func (a *ARQ) ioLoop() {
 		)
 	}
 
-	if a.isClosed() {
+	if a.isClosed() || alreadyHandled {
 		return
 	}
 
 	if resetRequired {
 		a.Abort(errorReason, true)
-	} else if a.finReceivedLocked() {
-		deadline := time.Now().Add(a.finDrainTimeout)
-		for time.Now().Before(deadline) && !a.isClosed() {
-			a.mu.Lock()
-			empty := len(a.sndBuf) == 0
-			a.mu.Unlock()
-			if empty {
-				break
-			}
-			time.Sleep(50 * time.Millisecond)
-		}
+		return
+	}
 
-		a.mu.Lock()
-		leftovers := len(a.sndBuf) > 0
-		a.mu.Unlock()
-
-		if leftovers && !a.isClosed() {
-			if a.isClient {
-				a.Abort("Remote FIN received but local send buffer did not drain", true)
-			} else {
-				a.deferTerminalPacket("Remote FIN received; waiting for outstanding data to drain", Enums.PACKET_STREAM_FIN)
-			}
-		} else if !a.isClosed() {
-			a.initiateGracefulClose("Remote FIN fully handled")
-		}
-	} else if gracefulEOF {
-		a.initiateGracefulClose(errorReason)
+	if gracefulEOF {
+		a.deferTerminalPacket(errorReason, Enums.PACKET_STREAM_FIN)
+		return
 	}
 }
 
@@ -914,39 +898,38 @@ func (a *ARQ) isClosed() bool {
 // 	)
 // }
 
-// flushReadyLocalData extracts from the unordered window buffer, sequentially emitting slices locally
+func (a *ARQ) retransmitLoop() {
+	defer a.wg.Done()
+	for {
+		a.mu.Lock()
+		rtoFactor := a.rto
+		if a.enableControlReliability && a.controlRto < a.rto {
+			rtoFactor = a.controlRto
+		}
 
-// func (a *ARQ) retransmitLoop() {
-// 	defer a.wg.Done()
-// 	for {
-// 		a.mu.Lock()
-// 		rtoFactor := a.rto
-// 		if a.enableControlReliability && a.controlRto < a.rto {
-// 			rtoFactor = a.controlRto
-// 		}
-// 		baseInterval := rtoFactor / 3
+		baseInterval := rtoFactor / 3
 
-// 		hasPending := len(a.sndBuf) > 0 || (a.enableControlReliability && len(a.controlSndBuf) > 0)
-// 		a.mu.Unlock()
+		hasPending := len(a.sndBuf) > 0 || (a.enableControlReliability && len(a.controlSndBuf) > 0)
+		a.mu.Unlock()
 
-// 		interval := baseInterval
-// 		if !hasPending {
-// 			interval = baseInterval * 4
-// 			if interval < 200*time.Millisecond {
-// 				interval = 200 * time.Millisecond
-// 			}
-// 		} else if interval < 50*time.Millisecond {
-// 			interval = 50 * time.Millisecond
-// 		}
+		interval := baseInterval
+		if !hasPending {
+			interval = baseInterval * 4
+			if interval < 200*time.Millisecond {
+				interval = 200 * time.Millisecond
+			}
+		} else if interval < 50*time.Millisecond {
+			interval = 50 * time.Millisecond
+		}
 
-// 		select {
-// 		case <-a.ctx.Done():
-// 			return
-// 		case <-time.After(interval):
-// 			a.checkRetransmits()
-// 		}
-// 	}
-// }
+		select {
+		case <-a.ctx.Done():
+			return
+		case <-time.After(interval):
+			a.checkRetransmits()
+		}
+	}
+}
 
 // ---------------------------------------------------------------------
 // Data Plane
@@ -1022,7 +1005,8 @@ func (a *ARQ) writeLoop() {
 
 			if a.localConn == nil {
 				a.mu.Unlock()
-				break
+				a.Abort("Local connection missing for writer", true)
+				return
 			}
 
 			var toWrite [][]byte
@@ -1035,6 +1019,7 @@ func (a *ARQ) writeLoop() {
 				delete(a.rcvBuf, a.rcvNxt)
 				a.rcvNxt++
 			}
+			conn := a.localConn
 			a.mu.Unlock()
 
 			if len(toWrite) == 0 {
@@ -1042,14 +1027,6 @@ func (a *ARQ) writeLoop() {
 			}
 
 			for _, chunk := range toWrite {
-				a.writeLock.Lock()
-				conn := a.localConn
-				a.writeLock.Unlock()
-
-				if conn == nil {
-					return
-				}
-
 				a.writeLock.Lock()
 				_, err := conn.Write(chunk)
 				a.writeLock.Unlock()
@@ -1252,89 +1229,89 @@ func (a *ARQ) signalFlushReady() {
 // 	return a.ReceiveControlAck(packetType, sequenceNum, fragmentID)
 // }
 
-// func (a *ARQ) checkRetransmits() {
-// 	if a.isClosed() {
-// 		return
-// 	}
+func (a *ARQ) checkRetransmits() {
+	if a.isClosed() {
+		return
+	}
 
-// 	a.mu.Lock()
-// 	now := time.Now()
-// 	if a.deferredClose {
-// 		shouldClose := len(a.sndBuf) == 0
-// 		shouldAbort := !a.deferredDeadline.IsZero() && now.After(a.deferredDeadline)
-// 		a.mu.Unlock()
-// 		if shouldClose || shouldAbort {
-// 			a.settleTerminalDrain()
-// 		}
-// 		if a.isClosed() {
-// 			return
-// 		}
-// 		a.mu.Lock()
-// 	}
-// 	if a.waitingAck && !a.ackWaitDeadline.IsZero() && now.After(a.ackWaitDeadline) {
-// 		a.mu.Unlock()
-// 		a.finalizeClose("Terminal ACK wait timeout")
-// 		return
-// 	}
-// 	if a.rstReceived && a.state != StateReset {
-// 		sn := uint16(0)
-// 		if a.rstSeqReceived != nil {
-// 			sn = *a.rstSeqReceived
-// 		}
-// 		a.mu.Unlock()
-// 		a.MarkRstReceived(sn)
-// 		a.Abort("Peer reset signaled", false)
-// 		return
-// 	}
-// 	if now.Sub(a.lastActivity) > a.inactivityTimeout {
-// 		if len(a.sndBuf) > 0 || (a.enableControlReliability && len(a.controlSndBuf) > 0) {
-// 			a.lastActivity = now
-// 		} else {
-// 			a.mu.Unlock()
-// 			a.Abort("Stream Inactivity Timeout (Dead)", true)
-// 			return
-// 		}
-// 	}
+	a.mu.Lock()
+	now := time.Now()
+	if a.deferredClose {
+		shouldClose := len(a.sndBuf) == 0
+		shouldAbort := !a.deferredDeadline.IsZero() && now.After(a.deferredDeadline)
+		a.mu.Unlock()
+		if shouldClose || shouldAbort {
+			a.settleTerminalDrain()
+		}
+		if a.isClosed() {
+			return
+		}
+		a.mu.Lock()
+	}
+	if a.waitingAck && !a.ackWaitDeadline.IsZero() && now.After(a.ackWaitDeadline) {
+		a.mu.Unlock()
+		a.finalizeClose("Terminal ACK wait timeout")
+		return
+	}
+	if a.rstReceived && a.state != StateReset {
+		sn := uint16(0)
+		if a.rstSeqReceived != nil {
+			sn = *a.rstSeqReceived
+		}
+		a.mu.Unlock()
+		a.MarkRstReceived(sn)
+		a.Abort("Peer reset signaled", false)
+		return
+	}
+	if now.Sub(a.lastActivity) > a.inactivityTimeout {
+		if len(a.sndBuf) > 0 || (a.enableControlReliability && len(a.controlSndBuf) > 0) {
+			a.lastActivity = now
+		} else {
+			a.mu.Unlock()
+			a.Abort("Stream Inactivity Timeout (Dead)", true)
+			return
+		}
+	}
 
-// 	type rtxJob struct {
-// 		sn              uint16
-// 		data            []byte
-// 		compressionType uint8
-// 	}
-// 	var jobs []rtxJob
+	type rtxJob struct {
+		sn              uint16
+		data            []byte
+		compressionType uint8
+	}
+	var jobs []rtxJob
 
-// 	for sn, info := range a.sndBuf {
-// 		if info.TTL > 0 {
-// 			if now.Sub(info.CreatedAt) >= info.TTL {
-// 				a.mu.Unlock()
-// 				a.handleTrackedPacketTTLExpiry(Enums.PACKET_STREAM_DATA, "Packet TTL expired")
-// 				return
-// 			}
-// 		} else if now.Sub(info.CreatedAt) >= a.dataPacketTTL && info.Retries >= a.maxDataRetries {
-// 			a.mu.Unlock()
-// 			a.Abort("Max retransmissions exceeded", true)
-// 			return
-// 		}
+	for sn, info := range a.sndBuf {
+		if info.TTL > 0 {
+			if now.Sub(info.CreatedAt) >= info.TTL {
+				a.mu.Unlock()
+				a.handleTrackedPacketTTLExpiry(Enums.PACKET_STREAM_DATA, "Packet TTL expired")
+				return
+			}
+		} else if now.Sub(info.CreatedAt) >= a.dataPacketTTL && info.Retries >= a.maxDataRetries {
+			a.mu.Unlock()
+			a.Abort("Max retransmissions exceeded", true)
+			return
+		}
 
-// 		if now.Sub(info.LastSentAt) >= info.CurrentRTO {
-// 			jobs = append(jobs, rtxJob{sn, info.Data, info.CompressionType})
-// 			info.LastSentAt = now
-// 			info.Retries++
+		if now.Sub(info.LastSentAt) >= info.CurrentRTO {
+			jobs = append(jobs, rtxJob{sn, info.Data, info.CompressionType})
+			info.LastSentAt = now
+			info.Retries++
 
-// 			grownRTO := time.Duration(float64(info.CurrentRTO) * 1.2)
-// 			info.CurrentRTO = time.Duration(minF(float64(a.maxRTO), maxF(float64(a.rto), float64(grownRTO))))
-// 		}
-// 	}
-// 	a.mu.Unlock()
+			grownRTO := time.Duration(float64(info.CurrentRTO) * 1.2)
+			info.CurrentRTO = time.Duration(minF(float64(a.maxRTO), maxF(float64(a.rto), float64(grownRTO))))
+		}
+	}
+	a.mu.Unlock()
 
-// 	for _, j := range jobs {
-// 		a.enqueuer.PushTXPacket(Enums.DefaultPacketPriority(Enums.PACKET_STREAM_RESEND), Enums.PACKET_STREAM_RESEND, j.sn, 0, 0, j.compressionType, 0, j.data)
-// 	}
+	for _, j := range jobs {
+		a.enqueuer.PushTXPacket(Enums.DefaultPacketPriority(Enums.PACKET_STREAM_RESEND), Enums.PACKET_STREAM_RESEND, j.sn, 0, 0, j.compressionType, 0, j.data)
+	}
 
-// 	if a.enableControlReliability {
-// 		a.checkControlRetransmits(now)
-// 	}
-// }
+	if a.enableControlReliability {
+		a.checkControlRetransmits(now)
+	}
+}
 
 // func (a *ARQ) checkControlRetransmits(now time.Time) {
 // 	a.mu.Lock()
