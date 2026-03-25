@@ -286,6 +286,7 @@ func (s *sessionStore) Lookup(sessionID uint8) (sessionLookupResult, bool) {
 			State:        sessionLookupActive,
 		}, true
 	}
+
 	if record, ok := s.recentClosed[sessionID]; ok {
 		return sessionLookupResult{
 			Cookie:       record.Cookie,
@@ -293,6 +294,7 @@ func (s *sessionStore) Lookup(sessionID uint8) (sessionLookupResult, bool) {
 			State:        sessionLookupClosed,
 		}, true
 	}
+
 	return sessionLookupResult{}, false
 }
 

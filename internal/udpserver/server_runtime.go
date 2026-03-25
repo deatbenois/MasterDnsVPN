@@ -21,27 +21,18 @@ func (s *Server) configureSocketBuffers(conn *net.UDPConn) {
 	if err := conn.SetReadBuffer(s.cfg.SocketBufferSize); err != nil {
 		s.log.Warnf("\U0001F4E1 <yellow>UDP Read Buffer Setup Failed, <cyan>%v</cyan></yellow>", err)
 	}
+
 	if err := conn.SetWriteBuffer(s.cfg.SocketBufferSize); err != nil {
 		s.log.Warnf("\U0001F4E1 <yellow>UDP Write Buffer Setup Failed, <cyan>%v</cyan></yellow>", err)
 	}
 }
 
-func (s *Server) logListenerReady() {
-	s.log.Infof(
-		"\U0001F4E1 <green>UDP Listener Ready, Addr: <cyan>%s</cyan>, Readers: <cyan>%d</cyan>, Workers: <cyan>%d</cyan>, Queue: <cyan>%d</cyan></green>",
-		s.cfg.Address(),
-		s.cfg.UDPReaders,
-		s.cfg.DNSRequestWorkers,
-		s.cfg.MaxConcurrentRequests,
-	)
-}
-
-func (s *Server) startWorkers(ctx context.Context, conn *net.UDPConn, reqCh <-chan request, workerWG *sync.WaitGroup) {
+func (s *Server) startDNSWorkers(ctx context.Context, conn *net.UDPConn, reqCh <-chan request, workerWG *sync.WaitGroup) {
 	for i := range s.cfg.DNSRequestWorkers {
 		workerWG.Add(1)
 		go func(workerID int) {
 			defer workerWG.Done()
-			s.worker(ctx, conn, reqCh, workerID)
+			s.dnsWorker(ctx, conn, reqCh, workerID)
 		}(i + 1)
 	}
 }
@@ -128,7 +119,7 @@ func (s *Server) readLoop(ctx context.Context, conn *net.UDPConn, reqCh chan<- r
 	}
 }
 
-func (s *Server) worker(ctx context.Context, conn *net.UDPConn, reqCh <-chan request, workerID int) {
+func (s *Server) dnsWorker(ctx context.Context, conn *net.UDPConn, reqCh <-chan request, workerID int) {
 	for {
 		select {
 		case <-ctx.Done():
@@ -167,6 +158,7 @@ func (s *Server) safeHandlePacket(packet []byte) (response []byte) {
 			response = nil
 		}
 	}()
+
 	return s.handlePacket(packet)
 }
 

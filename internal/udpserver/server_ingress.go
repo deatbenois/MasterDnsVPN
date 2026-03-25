@@ -21,9 +21,6 @@ import (
 func (s *Server) handlePacket(packet []byte) []byte {
 	parsed, err := DnsParser.ParseDNSRequestLite(packet)
 	if err != nil {
-		if s.debugLoggingEnabled() {
-			s.log.Debugf("\u26a0\ufe0f <yellow>DNS Parse Failed</yellow> <magenta>|</magenta> <blue>Error</blue>: <cyan>%v</cyan>", err)
-		}
 		if errors.Is(err, DnsParser.ErrNotDNSRequest) || errors.Is(err, DnsParser.ErrPacketTooShort) {
 			return nil
 		}
@@ -50,9 +47,6 @@ func (s *Server) handlePacket(packet []byte) []byte {
 func (s *Server) handleTunnelCandidate(packet []byte, parsed DnsParser.LitePacket, decision domainMatcher.Decision) []byte {
 	vpnPacket, err := VpnProto.ParseInflatedFromLabels(decision.Labels, s.codec)
 	if err != nil {
-		if s.debugLoggingEnabled() {
-			s.log.Debugf("\u26a0\ufe0f <yellow>VPN Proto Parse Failed</yellow> <magenta>|</magenta> <blue>Error</blue>: <cyan>%v</cyan>", err)
-		}
 		return s.buildNoDataResponseLiteLogged(packet, parsed, "vpn-proto-parse-failed")
 	}
 

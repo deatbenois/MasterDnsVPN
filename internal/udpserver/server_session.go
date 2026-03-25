@@ -76,6 +76,7 @@ func (s *Server) handleSessionCloseNotice(vpnPacket VpnProto.Packet, now time.Ti
 	if !known || lookup.State != sessionLookupActive || lookup.Cookie != vpnPacket.SessionCookie {
 		return
 	}
+
 	if !s.sessions.Close(vpnPacket.SessionID, now, s.cfg.ClosedSessionRetention()) {
 		return
 	}
@@ -123,7 +124,7 @@ func (s *Server) logInvalidSessionDrop(reason string, sessionID uint8, receivedC
 	}
 	if expectedCookie == 0 {
 		s.log.Debugf(
-			"Ã°Å¸Âªâ€š <yellow>Sending Session Drop</yellow> <magenta>|</magenta> <blue>Reason</blue>: <cyan>%s</cyan> <magenta>|</magenta> <blue>Session</blue>: <cyan>%d</cyan> <magenta>|</magenta> <blue>Received</blue>: <cyan>%d</cyan> <magenta>|</magenta> <blue>Mode</blue>: <cyan>%s</cyan>",
+			"\U0001F44B 👋 <yellow>Sending Session Drop</yellow> <magenta>|</magenta> <blue>Reason</blue>: <cyan>%s</cyan> <magenta>|</magenta> <blue>Session</blue>: <cyan>%d</cyan> <magenta>|</magenta> <blue>Received</blue>: <cyan>%d</cyan> <magenta>|</magenta> <blue>Mode</blue>: <cyan>%s</cyan>",
 			reason,
 			sessionID,
 			receivedCookie,
@@ -132,7 +133,7 @@ func (s *Server) logInvalidSessionDrop(reason string, sessionID uint8, receivedC
 		return
 	}
 	s.log.Debugf(
-		"Ã°Å¸Âªâ€š <yellow>Sending Session Drop</yellow> <magenta>|</magenta> <blue>Reason</blue>: <cyan>%s</cyan> <magenta>|</magenta> <blue>Session</blue>: <cyan>%d</cyan> <magenta>|</magenta> <blue>Expected</blue>: <cyan>%d</cyan> <magenta>|</magenta> <blue>Received</blue>: <cyan>%d</cyan> <magenta>|</magenta> <blue>Mode</blue>: <cyan>%s</cyan>",
+		"\U0001F44B <yellow>Sending Session Drop</yellow> <magenta>|</magenta> <blue>Reason</blue>: <cyan>%s</cyan> <magenta>|</magenta> <blue>Session</blue>: <cyan>%d</cyan> <magenta>|</magenta> <blue>Expected</blue>: <cyan>%d</cyan> <magenta>|</magenta> <blue>Received</blue>: <cyan>%d</cyan> <magenta>|</magenta> <blue>Mode</blue>: <cyan>%s</cyan>",
 		reason,
 		sessionID,
 		expectedCookie,

@@ -168,13 +168,22 @@ func (s *Server) Run(ctx context.Context) error {
 		IP:   net.ParseIP(s.cfg.UDPHost),
 		Port: s.cfg.UDPPort,
 	})
+
 	if err != nil {
 		return err
 	}
+
 	defer conn.Close()
 
 	s.configureSocketBuffers(conn)
-	s.logListenerReady()
+
+	s.log.Infof(
+		"\U0001F4E1 <green>UDP Listener Ready, Addr: <cyan>%s</cyan>, Readers: <cyan>%d</cyan>, Workers: <cyan>%d</cyan>, Queue: <cyan>%d</cyan></green>",
+		s.cfg.Address(),
+		s.cfg.UDPReaders,
+		s.cfg.DNSRequestWorkers,
+		s.cfg.MaxConcurrentRequests,
+	)
 
 	reqCh := make(chan request, s.cfg.MaxConcurrentRequests)
 	var workerWG sync.WaitGroup
@@ -184,8 +193,9 @@ func (s *Server) Run(ctx context.Context) error {
 		defer close(cleanupDone)
 		s.sessionCleanupLoop(runCtx)
 	}()
+
 	s.deferredSession.Start(runCtx)
-	s.startWorkers(runCtx, conn, reqCh, &workerWG)
+	s.startDNSWorkers(runCtx, conn, reqCh, &workerWG)
 
 	go func() {
 		<-runCtx.Done()

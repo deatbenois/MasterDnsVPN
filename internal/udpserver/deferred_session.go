@@ -68,8 +68,9 @@ func (p *deferredSessionProcessor) Start(ctx context.Context) {
 	if p == nil {
 		return
 	}
+
 	for idx := range p.workers {
-		go p.runWorker(ctx, idx)
+		go p.runDeferredWorker(ctx, idx)
 	}
 }
 
@@ -119,7 +120,7 @@ func (p *deferredSessionProcessor) RemoveSession(sessionID uint8) {
 	p.mu.Unlock()
 }
 
-func (p *deferredSessionProcessor) runWorker(ctx context.Context, workerIdx int) {
+func (p *deferredSessionProcessor) runDeferredWorker(ctx context.Context, workerIdx int) {
 	worker := &p.workers[workerIdx]
 	for {
 		select {
