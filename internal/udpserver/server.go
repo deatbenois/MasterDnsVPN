@@ -71,8 +71,12 @@ type Server struct {
 	mtuProbePayloadPool      sync.Pool
 	mtuProbeFillPattern      [256]byte
 	packetPool               sync.Pool
+	deferredInflightMu       sync.Mutex
+	deferredInflight         map[uint64]struct{}
 	droppedPackets           atomic.Uint64
 	lastDropLogUnix          atomic.Int64
+	deferredDroppedPackets   atomic.Uint64
+	lastDeferredDropLogUnix  atomic.Int64
 	pongNonce                atomic.Uint32
 	invalidDropMode          atomic.Uint32
 }
@@ -150,6 +154,7 @@ func New(cfg config.ServerConfig, log *logger.Logger, codec *security.Codec) *Se
 			},
 		},
 		mtuProbeFillPattern: buildMTUProbeFillPattern(),
+		deferredInflight:    make(map[uint64]struct{}, 128),
 		packetPool: sync.Pool{
 			New: func() any {
 				return make([]byte, cfg.MaxPacketSize)

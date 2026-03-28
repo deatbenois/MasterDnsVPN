@@ -59,9 +59,11 @@ func newTestServerForStreamSyn(protocol string) *Server {
 			ARQTerminalDrainTimeoutSec:    30.0,
 			ARQTerminalAckWaitTimeoutSec:  10.0,
 		},
-		sessions:        newSessionStore(8, 32),
-		dnsFragments:    fragmentStore.New[dnsFragmentKey](8),
-		socks5Fragments: fragmentStore.New[socks5FragmentKey](8),
+		sessions:         newSessionStore(8, 32),
+		deferredSession:  newDeferredSessionProcessor(1, 8, nil),
+		deferredInflight: make(map[uint64]struct{}, 8),
+		dnsFragments:     fragmentStore.New[dnsFragmentKey](8),
+		socks5Fragments:  fragmentStore.New[socks5FragmentKey](8),
 	}
 }
 
@@ -124,6 +126,73 @@ func TestProcessDeferredStreamSynQueuesConnectedAndEnablesIO(t *testing.T) {
 	if pkt, ok := stream.TXQueue.Get(key); !ok || pkt == nil {
 		t.Fatal("expected STREAM_CONNECTED to be queued after successful connect")
 	}
+}
+
+func TestHandleStreamSynDedupesPendingDeferredDuplicates(t *testing.T) {
+	s := newTestServerForStreamSyn("TCP")
+	record := newTestSessionRecord(22)
+	record.DownloadCompression = 0
+	s.sessions.byID[record.ID] = record
+
+	packet := packetWithSession(Enums.PACKET_STREAM_SYN, record.ID, record.Cookie, 9)
+	if !s.handleStreamSynRequest(packet, viewForRecord(record)) {
+		t.Fatal("expected first STREAM_SYN to be accepted")
+	}
+	if !s.handleStreamSynRequest(packet, viewForRecord(record)) {
+		t.Fatal("expected duplicate pending STREAM_SYN to be acknowledged")
+	}
+
+	if pending := s.deferredSession.workers[0].pending.Load(); pending != 1 {
+		t.Fatalf("expected exactly one deferred STREAM_SYN task, got %d", pending)
+	}
+
+	stream, ok := record.getStream(9)
+	if !ok || stream == nil {
+		t.Fatal("expected STREAM_SYN ACK path to create stream")
+	}
+
+	key := Enums.PacketIdentityKey(stream.ID, Enums.PACKET_STREAM_SYN_ACK, packet.SequenceNum, packet.FragmentID)
+	if _, ok := stream.TXQueue.Get(key); !ok {
+		t.Fatal("expected STREAM_SYN_ACK to be queued for accepted duplicate")
+	}
+}
+
+func TestClearDeferredPacketsForStreamAllowsFreshRequeue(t *testing.T) {
+	s := newTestServerForStreamSyn("TCP")
+	packet := packetWithSession(Enums.PACKET_STREAM_SYN, 7, 3, 9)
+
+	if !s.tryBeginDeferredPacket(packet) {
+		t.Fatal("expected first deferred marker to be recorded")
+	}
+	if s.tryBeginDeferredPacket(packet) {
+		t.Fatal("expected duplicate deferred marker to be rejected while pending")
+	}
+
+	s.clearDeferredPacketsForStream(packet.SessionID, packet.StreamID)
+
+	if !s.tryBeginDeferredPacket(packet) {
+		t.Fatal("expected stream deferred markers to be cleared")
+	}
+	s.finishDeferredPacket(packet)
+}
+
+func TestProcessDeferredSOCKS5SynSkipsDialForRecentlyClosedStream(t *testing.T) {
+	s := newTestServerForStreamSyn("SOCKS5")
+	record := newTestSessionRecord(25)
+	record.DownloadCompression = 0
+	s.sessions.byID[record.ID] = record
+	record.noteStreamClosed(10, time.Now(), false)
+
+	s.dialStreamUpstreamFn = func(network string, address string, timeout time.Duration) (net.Conn, error) {
+		t.Fatalf("unexpected dial for recently closed stream")
+		return nil, nil
+	}
+
+	packet := packetWithSession(Enums.PACKET_SOCKS5_SYN, record.ID, record.Cookie, 10)
+	packet.Payload = []byte{0x01, 127, 0, 0, 1, 0x01, 0xBB}
+	packet.TotalFragments = 1
+
+	s.processDeferredSOCKS5Syn(packet)
 }
 
 func TestProcessDeferredStreamSynQueuesConnectFailOnDialError(t *testing.T) {

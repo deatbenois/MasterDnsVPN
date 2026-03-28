@@ -67,6 +67,7 @@ type sessionRecord struct {
 	LastPackedControlBlock          *VpnProto.Packet
 	LastPackedControlBlockRemaining int
 	closedFlag                      uint32
+	streamCleanup                  func(uint8, uint16)
 }
 
 type recentlyClosedStreamRecord struct {
@@ -664,6 +665,9 @@ func (r *sessionRecord) onStreamClosed(streamID uint16, now time.Time, reason st
 		return
 	}
 	r.removeStream(streamID, now, shouldSuppressServerOrphanForCloseReason(reason))
+	if r.streamCleanup != nil {
+		r.streamCleanup(r.ID, streamID)
+	}
 }
 
 func (r *sessionRecord) getStream(streamID uint16) (*Stream_server, bool) {

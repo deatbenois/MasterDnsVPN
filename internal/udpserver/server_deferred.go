@@ -20,6 +20,11 @@ import (
 )
 
 func (s *Server) processDeferredDNSQuery(sessionID uint8, sequenceNum uint16, downloadCompression uint8, downloadMTUBytes int, assembledQuery []byte) {
+	lookup, known := s.sessions.Lookup(sessionID)
+	if !known || !s.shouldExecuteDeferredPacket(VpnProto.Packet{SessionID: sessionID, SessionCookie: lookup.Cookie, StreamID: 0}) {
+		return
+	}
+
 	if !s.sessions.HasActive(sessionID) {
 		return
 	}
@@ -36,6 +41,10 @@ func (s *Server) processDeferredDNSQuery(sessionID uint8, sequenceNum uint16, do
 
 	totalFragments := uint8(len(fragments))
 	for fragmentID, fragmentPayload := range fragments {
+		lookup, known := s.sessions.Lookup(sessionID)
+		if !known || !s.shouldExecuteDeferredPacket(VpnProto.Packet{SessionID: sessionID, SessionCookie: lookup.Cookie, StreamID: 0}) {
+			return
+		}
 		_ = s.queueMainSessionPacket(sessionID, VpnProto.Packet{
 			PacketType:      Enums.PACKET_DNS_QUERY_RES,
 			StreamID:        0,
@@ -49,6 +58,10 @@ func (s *Server) processDeferredDNSQuery(sessionID uint8, sequenceNum uint16, do
 }
 
 func (s *Server) processDeferredStreamSyn(vpnPacket VpnProto.Packet) {
+	if !s.shouldExecuteDeferredPacket(vpnPacket) {
+		return
+	}
+
 	record, ok := s.sessions.Get(vpnPacket.SessionID)
 	if !ok {
 		return
@@ -99,8 +112,15 @@ func (s *Server) processDeferredStreamSyn(vpnPacket VpnProto.Packet) {
 		return
 	}
 
+	if !s.shouldExecuteDeferredPacket(vpnPacket) {
+		return
+	}
+
 	upstreamConn, err := s.dialTCPTarget(net.JoinHostPort(s.cfg.ForwardIP, strconv.Itoa(s.cfg.ForwardPort)))
 	if err != nil {
+		if !s.shouldExecuteDeferredPacket(vpnPacket) {
+			return
+		}
 		stream.ARQ.SendControlPacketWithTTL(
 			Enums.PACKET_STREAM_CONNECT_FAIL,
 			vpnPacket.SequenceNum,
@@ -116,6 +136,11 @@ func (s *Server) processDeferredStreamSyn(vpnPacket VpnProto.Packet) {
 	}
 
 	if record.isClosed() || !stream.attachUpstreamConn(upstreamConn, s.cfg.ForwardIP, uint16(s.cfg.ForwardPort), "CONNECTED") {
+		_ = upstreamConn.Close()
+		return
+	}
+
+	if !s.shouldExecuteDeferredPacket(vpnPacket) {
 		_ = upstreamConn.Close()
 		return
 	}
@@ -136,6 +161,10 @@ func (s *Server) processDeferredStreamSyn(vpnPacket VpnProto.Packet) {
 }
 
 func (s *Server) processDeferredSOCKS5Syn(vpnPacket VpnProto.Packet) {
+	if !s.shouldExecuteDeferredPacket(vpnPacket) {
+		return
+	}
+
 	record, ok := s.sessions.Get(vpnPacket.SessionID)
 	if !ok {
 		return
@@ -161,9 +190,16 @@ func (s *Server) processDeferredSOCKS5Syn(vpnPacket VpnProto.Packet) {
 		return
 	}
 
+	if !s.shouldExecuteDeferredPacket(vpnPacket) {
+		return
+	}
+
 	stream := record.getOrCreateStream(vpnPacket.StreamID, s.streamARQConfig(record.DownloadCompression), nil, s.log)
 	target, err := SocksProto.ParseTargetPayload(assembledTarget)
 	if err != nil {
+		if !s.shouldExecuteDeferredPacket(vpnPacket) {
+			return
+		}
 		packetType := uint8(Enums.PACKET_SOCKS5_CONNECT_FAIL)
 		if errors.Is(err, SocksProto.ErrUnsupportedAddressType) || errors.Is(err, SocksProto.ErrInvalidDomainLength) {
 			packetType = uint8(Enums.PACKET_SOCKS5_ADDRESS_TYPE_UNSUPPORTED)
@@ -223,8 +259,15 @@ func (s *Server) processDeferredSOCKS5Syn(vpnPacket VpnProto.Packet) {
 		return
 	}
 
+	if !s.shouldExecuteDeferredPacket(vpnPacket) {
+		return
+	}
+
 	upstreamConn, err := s.dialSOCKSStreamTarget(target.Host, target.Port, assembledTarget)
 	if err != nil {
+		if !s.shouldExecuteDeferredPacket(vpnPacket) {
+			return
+		}
 		packetType := s.mapSOCKSConnectError(err)
 		if s.log != nil {
 			s.log.Debugf(
@@ -252,6 +295,11 @@ func (s *Server) processDeferredSOCKS5Syn(vpnPacket VpnProto.Packet) {
 	}
 
 	if record.isClosed() || !stream.attachUpstreamConn(upstreamConn, target.Host, target.Port, "CONNECTED") {
+		_ = upstreamConn.Close()
+		return
+	}
+
+	if !s.shouldExecuteDeferredPacket(vpnPacket) {
 		_ = upstreamConn.Close()
 		return
 	}

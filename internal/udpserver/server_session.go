@@ -208,11 +208,21 @@ func (s *Server) cleanupClosedSession(sessionID uint8, record *sessionRecord) {
 	if s == nil || sessionID == 0 {
 		return
 	}
+	s.clearDeferredPacketsForSession(sessionID)
+	s.removeSOCKS5SynFragmentsForSession(sessionID)
 	if record != nil {
 		record.closeAllStreams("session closed cleanup")
 	}
 	s.deferredSession.RemoveSession(sessionID)
 	s.removeDNSQueryFragmentsForSession(sessionID)
+}
+
+func (s *Server) cleanupStreamArtifacts(sessionID uint8, streamID uint16) {
+	if s == nil || sessionID == 0 || streamID == 0 {
+		return
+	}
+	s.clearDeferredPacketsForStream(sessionID, streamID)
+	s.removeSOCKS5SynFragmentsForStream(sessionID, streamID)
 }
 
 func (s *Server) serveQueuedOrPong(questionPacket []byte, requestName string, record *sessionRuntimeView, now time.Time) []byte {
@@ -518,10 +528,7 @@ func isDeferredPostSessionPacketType(packetType uint8) bool {
 	switch packetType {
 	case Enums.PACKET_DNS_QUERY_REQ,
 		Enums.PACKET_STREAM_SYN,
-		Enums.PACKET_SOCKS5_SYN,
-		Enums.PACKET_STREAM_DATA,
-		Enums.PACKET_STREAM_DATA_NACK,
-		Enums.PACKET_STREAM_RESEND:
+		Enums.PACKET_SOCKS5_SYN:
 		return true
 	default:
 		return false
@@ -577,6 +584,7 @@ func (s *Server) handleSessionInitRequest(questionPacket []byte, decision domain
 	if record == nil {
 		return nil
 	}
+	record.streamCleanup = s.cleanupStreamArtifacts
 
 	if !reused && s.log != nil {
 		s.log.Infof(

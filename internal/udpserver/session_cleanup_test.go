@@ -47,15 +47,17 @@ func newTestSessionRecord(sessionID uint8) *sessionRecord {
 
 func newTestServerForCleanup() *Server {
 	return &Server{
-		deferredSession: nil,
-		dnsFragments:    fragmentStore.New[dnsFragmentKey](8),
-		socks5Fragments: fragmentStore.New[socks5FragmentKey](8),
+		deferredSession:  nil,
+		deferredInflight: make(map[uint64]struct{}, 8),
+		dnsFragments:     fragmentStore.New[dnsFragmentKey](8),
+		socks5Fragments:  fragmentStore.New[socks5FragmentKey](8),
 	}
 }
 
 func TestCleanupClosedSessionClosesStreamsAndClearsQueues(t *testing.T) {
 	s := newTestServerForCleanup()
 	record := newTestSessionRecord(7)
+	record.streamCleanup = s.cleanupStreamArtifacts
 
 	upstream := &testReadWriteCloser{}
 	stream := record.getOrCreateStream(1, arq.Config{}, nil, nil)
@@ -64,6 +66,23 @@ func TestCleanupClosedSessionClosesStreamsAndClearsQueues(t *testing.T) {
 		t.Fatalf("expected TX packet to be queued")
 	}
 	record.enqueueOrphanReset(Enums.PACKET_STREAM_RST, 1, 12)
+	s.deferredInflight[deferredTrackedPacketKey(VpnProto.Packet{
+		SessionID:     record.ID,
+		SessionCookie: record.Cookie,
+		PacketType:    Enums.PACKET_SOCKS5_SYN,
+		StreamID:      1,
+		SequenceNum:   12,
+	})] = struct{}{}
+	if _, _, completed := s.socks5Fragments.Collect(
+		socks5FragmentKey{sessionID: record.ID, streamID: 1, sequenceNum: 12},
+		[]byte{0x01, 127, 0, 0, 1, 0x01, 0xBB},
+		0,
+		1,
+		time.Now(),
+		5*time.Minute,
+	); completed {
+		t.Fatal("unexpected completed SOCKS5 fragment state")
+	}
 
 	s.cleanupClosedSession(record.ID, record)
 
@@ -90,6 +109,24 @@ func TestCleanupClosedSessionClosesStreamsAndClearsQueues(t *testing.T) {
 	}
 	if record.OrphanQueue.Size() != 0 {
 		t.Fatalf("expected orphan queue to be cleared, got %d", record.OrphanQueue.Size())
+	}
+	if _, exists := s.deferredInflight[deferredTrackedPacketKey(VpnProto.Packet{
+		SessionID:   record.ID,
+		PacketType:  Enums.PACKET_SOCKS5_SYN,
+		StreamID:    1,
+		SequenceNum: 12,
+	})]; exists {
+		t.Fatal("expected deferred inflight entries for closed session to be cleared")
+	}
+	if _, ready, completed := s.socks5Fragments.Collect(
+		socks5FragmentKey{sessionID: record.ID, streamID: 1, sequenceNum: 12},
+		[]byte{0x01, 8, 8, 8, 8, 0x00, 0x35},
+		0,
+		1,
+		time.Now().Add(time.Second),
+		5*time.Minute,
+	); !ready || completed {
+		t.Fatal("expected closed session cleanup to clear SOCKS5 fragment state")
 	}
 }
 
@@ -373,6 +410,86 @@ func TestReusedStreamIDClearsRecentlyClosedTombstone(t *testing.T) {
 	}
 	if record.isRecentlyClosed(21, time.Now()) {
 		t.Fatal("expected recreated stream id to be removed from recently closed set")
+	}
+}
+
+func TestPreprocessInboundPacketDoesNotQueueImmediateDataAck(t *testing.T) {
+	s := newTestServerForStreamSyn("TCP")
+	record := newTestSessionRecord(19)
+	record.Cookie = 11
+	record.DownloadCompression = 0
+	s.sessions.byID[record.ID] = record
+
+	stream := record.getOrCreateStream(31, s.streamARQConfig(record.DownloadCompression), nil, s.log)
+	if stream == nil {
+		t.Fatal("expected stream to be created")
+	}
+
+	packet := VpnProto.Packet{
+		SessionID:      record.ID,
+		SessionCookie:  record.Cookie,
+		PacketType:     Enums.PACKET_STREAM_DATA,
+		StreamID:       31,
+		HasStreamID:    true,
+		SequenceNum:    7,
+		HasSequenceNum: true,
+		Payload:        []byte("hello"),
+	}
+
+	if s.preprocessInboundPacket(packet) {
+		t.Fatal("expected stream data not to be fully consumed in preprocess")
+	}
+
+	key := Enums.PacketIdentityKey(stream.ID, Enums.PACKET_STREAM_DATA_ACK, packet.SequenceNum, 0)
+	if pkt, ok := stream.TXQueue.Get(key); ok || pkt != nil {
+		t.Fatal("expected no immediate STREAM_DATA_ACK to be queued during preprocess")
+	}
+}
+
+func TestOnStreamClosedCleansDeferredAndSOCKSArtifacts(t *testing.T) {
+	s := newTestServerForCleanup()
+	record := newTestSessionRecord(20)
+	record.Cookie = 13
+	record.streamCleanup = s.cleanupStreamArtifacts
+
+	stream := record.getOrCreateStream(33, arq.Config{}, nil, nil)
+	if stream == nil {
+		t.Fatal("expected stream to be created")
+	}
+
+	packet := VpnProto.Packet{
+		SessionID:     record.ID,
+		SessionCookie: record.Cookie,
+		PacketType:    Enums.PACKET_SOCKS5_SYN,
+		StreamID:      33,
+		SequenceNum:   4,
+	}
+	s.deferredInflight[deferredTrackedPacketKey(packet)] = struct{}{}
+	if _, _, completed := s.socks5Fragments.Collect(
+		socks5FragmentKey{sessionID: record.ID, streamID: 33, sequenceNum: 4},
+		[]byte{0x01, 127, 0, 0, 1, 0x01, 0xBB},
+		0,
+		1,
+		time.Now(),
+		5*time.Minute,
+	); completed {
+		t.Fatal("unexpected completed SOCKS5 fragment state")
+	}
+
+	stream.OnARQClosed("FIN handshake completed")
+
+	if _, exists := s.deferredInflight[deferredTrackedPacketKey(packet)]; exists {
+		t.Fatal("expected stream close to clear deferred inflight state")
+	}
+	if _, ready, completed := s.socks5Fragments.Collect(
+		socks5FragmentKey{sessionID: record.ID, streamID: 33, sequenceNum: 4},
+		[]byte{0x01, 8, 8, 8, 8, 0x00, 0x35},
+		0,
+		1,
+		time.Now().Add(time.Second),
+		5*time.Minute,
+	); !ready || completed {
+		t.Fatal("expected stream close to clear SOCKS5 fragment state")
 	}
 }
 
