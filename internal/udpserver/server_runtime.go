@@ -57,12 +57,14 @@ func (s *Server) sessionCleanupLoop(ctx context.Context) {
 	if interval <= 0 {
 		interval = 30 * time.Second
 	}
+	recentlyClosedSweepInterval := 5 * time.Minute
 	sessionTimeout := s.cfg.SessionTimeout()
 	closedRetention := s.cfg.ClosedSessionRetention()
 	invalidCookieWindow := s.invalidCookieWindow
 
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
+	lastRecentlyClosedSweep := time.Time{}
 
 	for {
 		select {
@@ -71,6 +73,10 @@ func (s *Server) sessionCleanupLoop(ctx context.Context) {
 		case now := <-ticker.C:
 			expired := s.sessions.Cleanup(now, sessionTimeout, closedRetention)
 			s.sessions.SweepTerminalStreams(now, s.cfg.TerminalStreamRetention())
+			if lastRecentlyClosedSweep.IsZero() || now.Sub(lastRecentlyClosedSweep) >= recentlyClosedSweepInterval {
+				s.sessions.SweepRecentlyClosedStreams(now)
+				lastRecentlyClosedSweep = now
+			}
 			s.invalidCookieTracker.Cleanup(now, invalidCookieWindow)
 			s.purgeDNSQueryFragments(now)
 			s.purgeSOCKS5SynFragments(now)

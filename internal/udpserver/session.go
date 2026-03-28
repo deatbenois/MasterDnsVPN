@@ -67,7 +67,7 @@ type sessionRecord struct {
 	LastPackedControlBlock          *VpnProto.Packet
 	LastPackedControlBlockRemaining int
 	closedFlag                      uint32
-	streamCleanup                  func(uint8, uint16)
+	streamCleanup                   func(uint8, uint16)
 }
 
 type recentlyClosedStreamRecord struct {
@@ -479,6 +479,21 @@ func (s *sessionStore) SweepTerminalStreams(now time.Time, retention time.Durati
 	}
 }
 
+func (s *sessionStore) SweepRecentlyClosedStreams(now time.Time) {
+	s.mu.Lock()
+	records := make([]*sessionRecord, 0, len(s.byID))
+	for _, record := range s.byID {
+		if record != nil {
+			records = append(records, record)
+		}
+	}
+	s.mu.Unlock()
+
+	for _, record := range records {
+		record.pruneRecentlyClosed(now)
+	}
+}
+
 func (s *sessionStore) allocateSlotLocked() int {
 	if s.activeCount >= maxServerSessionSlots {
 		return -1
@@ -686,13 +701,7 @@ func (r *sessionRecord) noteStreamClosed(streamID uint16, now time.Time, suppres
 	r.StreamsMu.Lock()
 	defer r.StreamsMu.Unlock()
 
-	// Cleanup old records
-	expiredBefore := now.Add(-r.closedStreamRecordTTL())
-	for id, record := range r.RecentlyClosed {
-		if record.ClosedAt.Before(expiredBefore) {
-			delete(r.RecentlyClosed, id)
-		}
-	}
+	r.pruneRecentlyClosedLocked(now)
 
 	r.RecentlyClosed[streamID] = recentlyClosedStreamRecord{
 		ClosedAt:       now,
@@ -712,6 +721,27 @@ func (r *sessionRecord) noteStreamClosed(streamID uint16, now time.Time, suppres
 			}
 		}
 		delete(r.RecentlyClosed, oldestID)
+	}
+}
+
+func (r *sessionRecord) pruneRecentlyClosed(now time.Time) {
+	if r == nil || r.isClosed() {
+		return
+	}
+	r.StreamsMu.Lock()
+	r.pruneRecentlyClosedLocked(now)
+	r.StreamsMu.Unlock()
+}
+
+func (r *sessionRecord) pruneRecentlyClosedLocked(now time.Time) {
+	if r == nil {
+		return
+	}
+	expiredBefore := now.Add(-r.closedStreamRecordTTL())
+	for id, record := range r.RecentlyClosed {
+		if record.ClosedAt.Before(expiredBefore) {
+			delete(r.RecentlyClosed, id)
+		}
 	}
 }
 

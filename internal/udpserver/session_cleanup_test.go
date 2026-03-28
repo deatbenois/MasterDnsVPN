@@ -414,6 +414,24 @@ func TestReusedStreamIDClearsRecentlyClosedTombstone(t *testing.T) {
 	}
 }
 
+func TestSweepRecentlyClosedStreamsPrunesExpiredEntries(t *testing.T) {
+	sessions := newSessionStore(8, 32)
+	record := newTestSessionRecord(23)
+	record.RecentlyClosedTTL = 10 * time.Minute
+	record.RecentlyClosed[5] = recentlyClosedStreamRecord{ClosedAt: time.Now().Add(-11 * time.Minute)}
+	record.RecentlyClosed[6] = recentlyClosedStreamRecord{ClosedAt: time.Now().Add(-2 * time.Minute)}
+	sessions.byID[record.ID] = record
+
+	sessions.SweepRecentlyClosedStreams(time.Now())
+
+	if _, ok := record.RecentlyClosed[5]; ok {
+		t.Fatal("expected expired recently closed entry to be pruned")
+	}
+	if _, ok := record.RecentlyClosed[6]; !ok {
+		t.Fatal("expected fresh recently closed entry to remain")
+	}
+}
+
 func TestPreprocessInboundPacketDoesNotQueueImmediateDataAck(t *testing.T) {
 	s := newTestServerForStreamSyn("TCP")
 	record := newTestSessionRecord(19)
