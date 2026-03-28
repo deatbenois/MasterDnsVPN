@@ -29,6 +29,8 @@ type MultiLevelQueue[T any] struct {
 	census map[uint64]T
 }
 
+const compactThreshold = 1024
+
 // New creates a new MultiLevelQueue with an initial census capacity.
 func New[T any](initialCapacity int) *MultiLevelQueue[T] {
 	m := &MultiLevelQueue[T]{
@@ -113,6 +115,7 @@ func (m *MultiLevelQueue[T]) popLocked(keyExtractor func(T) uint64) (T, int, boo
 		// Memory safety: Clear the pointer from the slice to avoid leaks if T is a pointer
 		q.Items[0] = zero
 		q.Items = q.Items[1:]
+		maybeCompactQueue(q)
 
 		// Update census and bitmask
 		if keyExtractor != nil {
@@ -127,6 +130,18 @@ func (m *MultiLevelQueue[T]) popLocked(keyExtractor func(T) uint64) (T, int, boo
 	}
 
 	return zero, 0, false
+}
+
+func maybeCompactQueue[T any](q *PriorityQueue[T]) {
+	if q == nil {
+		return
+	}
+	if cap(q.Items) <= compactThreshold || len(q.Items) >= cap(q.Items)/4 {
+		return
+	}
+	compacted := make([]T, len(q.Items))
+	copy(compacted, q.Items)
+	q.Items = compacted
 }
 
 // Get checks if an item exists in the queue using its tracking key.
@@ -168,6 +183,7 @@ func (m *MultiLevelQueue[T]) RemoveByKey(key uint64, keyExtractor func(T) uint64
 			last := len(q.Items) - 1
 			q.Items[last] = zero
 			q.Items = q.Items[:last]
+			maybeCompactQueue(q)
 
 			delete(m.census, key)
 			if len(q.Items) == 0 {
@@ -258,6 +274,7 @@ func (m *MultiLevelQueue[T]) PopIf(priority int, predicate func(T) bool, keyExtr
 	// Allowed to pop!
 	q.Items[0] = zero // Memory safety
 	q.Items = q.Items[1:]
+	maybeCompactQueue(q)
 
 	if keyExtractor != nil {
 		delete(m.census, keyExtractor(item))
@@ -296,6 +313,7 @@ func (m *MultiLevelQueue[T]) PopAnyIf(predicate func(T) bool, keyExtractor func(
 					last := len(q.Items) - 1
 					q.Items[last] = zero
 					q.Items = q.Items[:last]
+					maybeCompactQueue(q)
 
 					if keyExtractor != nil {
 						delete(m.census, keyExtractor(item))

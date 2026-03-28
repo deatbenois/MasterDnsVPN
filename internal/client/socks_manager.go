@@ -602,16 +602,11 @@ func (c *Client) handleSocksUDPAssociate(ctx context.Context, conn net.Conn, cli
 		}
 
 		if targetPort != 53 {
-			c.log.Debugf("⚠️ <yellow>SOCKS5 UDP packet to non-DNS port %s:%d dropped. Closing association.</yellow>", targetAddr, targetPort)
+			c.rejectSocksUDPAssociateUnsupportedTarget(conn, targetAddr, targetPort)
 			return
 		}
 
 		c.log.Infof("📡 <green>Received DNS Query from SOCKS5 UDP: <cyan>%d bytes</cyan>, Target: <cyan>%s:%d</cyan></green>", n-payloadOffset, targetAddr, targetPort)
-
-		if targetPort != 53 {
-			c.rejectSocksUDPAssociateUnsupportedTarget(conn, targetAddr, targetPort)
-			return
-		}
 
 		dnsQuery := buf[payloadOffset:n]
 
