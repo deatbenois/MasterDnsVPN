@@ -178,6 +178,13 @@ jobs:
           go-version: "1.21"
           cache: true
 
+      - name: Set up Java 17 for Android builds
+        if: ${{ matrix.android_ndk }}
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "17"
+
       - name: Set up Android SDK
         if: ${{ matrix.android_ndk }}
         uses: android-actions/setup-android@v3
