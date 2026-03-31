@@ -297,7 +297,6 @@ jobs:
           GOARM: ${{ matrix.go_arm }}
           GOMIPS: ${{ matrix.go_mips }}
           GOMIPS64: ${{ matrix.go_mips64 }}
-          GORISCV64: ${{ matrix.go_riscv64 }}
           CC: ${{ env.CC }}
           CXX: ${{ env.CXX }}
         run: |
@@ -311,7 +310,6 @@ jobs:
           GOARM: ${{ matrix.go_arm }}
           GOMIPS: ${{ matrix.go_mips }}
           GOMIPS64: ${{ matrix.go_mips64 }}
-          GORISCV64: ${{ matrix.go_riscv64 }}
           CC: ${{ env.CC }}
           CXX: ${{ env.CXX }}
         run: |
