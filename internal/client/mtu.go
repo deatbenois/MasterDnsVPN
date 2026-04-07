@@ -245,13 +245,6 @@ func (c *Client) collectInactiveResolverHealthChecks(recheckInterval time.Durati
 }
 
 func (c *Client) recheckInactiveResolver(ctx context.Context, conn Connection) {
-	if c.recheckConnectionFn != nil {
-		if c.recheckConnectionFn(&conn) {
-			c.reactivateRecheckedResolver(conn)
-		}
-		return
-	}
-
 	transport, err := newUDPQueryTransport(conn.ResolverLabel)
 	if err != nil {
 		return

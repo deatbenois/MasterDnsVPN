@@ -189,18 +189,6 @@ func (c *Client) Log() *logger.Logger {
 	return c.log
 }
 
-// connectionPtrByKey remains as a bridge, now fetching from Balancer.
-func (c *Client) connectionPtrByKey(key string) *Connection {
-	if c.balancer == nil {
-		return nil
-	}
-	conn, ok := c.balancer.GetConnectionByKey(key)
-	if !ok {
-		return nil
-	}
-	return &conn
-}
-
 func (c *Client) GetConnectionByKey(key string) (Connection, bool) {
 	if c == nil || c.balancer == nil || key == "" {
 		return Connection{}, false

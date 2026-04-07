@@ -45,7 +45,6 @@ type Client struct {
 	resolverAddrMu      sync.RWMutex
 	resolverAddrCache   map[string]*net.UDPAddr
 	nowFn               func() time.Time
-	recheckConnectionFn func(conn *Connection) bool
 
 	// MTU States
 	syncedUploadMTU                       int

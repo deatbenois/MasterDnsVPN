@@ -81,7 +81,9 @@ type Balancer struct {
 	connections  []Connection
 	indexByKey   map[string]int
 	activeIDs    []int
+	activePos    map[int]int
 	inactiveIDs  []int
+	inactivePos  map[int]int
 	stats        []*connectionStats
 	streamRoutes map[uint16]*balancerStreamRouteState
 	pending      map[balancerResolverSampleKey]balancerResolverSample
@@ -137,7 +139,9 @@ func (b *Balancer) SetConnections(connections []*Connection) {
 	b.connections = make([]Connection, 0, size)
 	b.indexByKey = make(map[string]int, size)
 	b.activeIDs = make([]int, 0, size)
+	b.activePos = make(map[int]int, size)
 	b.inactiveIDs = make([]int, 0, size)
+	b.inactivePos = make(map[int]int, size)
 	b.stats = make([]*connectionStats, 0, size)
 	if b.pending == nil {
 		b.pending = make(map[balancerResolverSampleKey]balancerResolverSample)
@@ -168,6 +172,7 @@ func (b *Balancer) SetConnections(connections []*Connection) {
 		idx := len(b.connections)
 		b.connections = append(b.connections, copied)
 		b.indexByKey[copied.Key] = idx
+		b.inactivePos[idx] = len(b.inactiveIDs)
 		b.inactiveIDs = append(b.inactiveIDs, idx)
 		b.stats = append(b.stats, &connectionStats{})
 	}
@@ -216,7 +221,8 @@ func (b *Balancer) SetConnectionValidity(key string, valid bool) bool {
 	} else {
 		b.clearPreferredResolverReferencesLocked(key)
 	}
-	b.rebuildStateIndicesLocked()
+	b.moveConnectionStateLocked(idx, valid)
+	b.version.Add(1)
 	return true
 }
 
@@ -249,18 +255,18 @@ func (b *Balancer) ApplyMTUProbeResult(key string, uploadBytes int, uploadChars 
 	conn.UploadMTUChars = uploadChars
 	conn.DownloadMTUBytes = downloadBytes
 	conn.MTUResolveTime = resolveTime
+	wasValid := conn.IsValid
 	conn.IsValid = active
 	if active {
 		b.resetWindowLocked(conn)
 	} else {
 		b.clearPreferredResolverReferencesLocked(key)
 	}
-	b.rebuildStateIndicesLocked()
+	if wasValid != active {
+		b.moveConnectionStateLocked(idx, active)
+		b.version.Add(1)
+	}
 	return true
-}
-
-func (b *Balancer) SnapshotVersion() uint64 {
-	return b.version.Load()
 }
 
 func (b *Balancer) ReportSend(serverKey string) {
@@ -352,7 +358,10 @@ func (b *Balancer) ReportTimeoutWindow(serverKey string, now time.Time, window t
 	conn.IsValid = false
 	b.resetWindowLocked(conn)
 	b.clearPreferredResolverReferencesLocked(serverKey)
-	b.rebuildStateIndicesLocked()
+	if idx, ok := b.indexByKey[serverKey]; ok {
+		b.moveConnectionStateLocked(idx, false)
+	}
+	b.version.Add(1)
 	return true
 }
 
@@ -733,7 +742,7 @@ func (b *Balancer) NoteStreamProgress(streamID uint16) {
 	}
 
 	b.mu.Lock()
-	if state := b.ensureStreamRouteLocked(streamID); state != nil {
+	if state, ok := b.streamRoutes[streamID]; ok && state != nil {
 		state.ResendStreak = 0
 	}
 	b.mu.Unlock()
@@ -913,17 +922,60 @@ func (b *Balancer) clearPreferredResolverReferencesLocked(serverKey string) {
 	}
 }
 
-func (b *Balancer) rebuildStateIndicesLocked() {
-	b.activeIDs = b.activeIDs[:0]
-	b.inactiveIDs = b.inactiveIDs[:0]
-	for idx := range b.connections {
-		if b.connections[idx].IsValid {
-			b.activeIDs = append(b.activeIDs, idx)
-		} else {
-			b.inactiveIDs = append(b.inactiveIDs, idx)
-		}
+func (b *Balancer) moveConnectionStateLocked(idx int, valid bool) {
+	if valid {
+		b.removeInactiveIndexLocked(idx)
+		b.addActiveIndexLocked(idx)
+		return
 	}
-	b.version.Add(1)
+	b.removeActiveIndexLocked(idx)
+	b.addInactiveIndexLocked(idx)
+}
+
+func (b *Balancer) addActiveIndexLocked(idx int) {
+	if _, exists := b.activePos[idx]; exists {
+		return
+	}
+	b.activePos[idx] = len(b.activeIDs)
+	b.activeIDs = append(b.activeIDs, idx)
+}
+
+func (b *Balancer) addInactiveIndexLocked(idx int) {
+	if _, exists := b.inactivePos[idx]; exists {
+		return
+	}
+	b.inactivePos[idx] = len(b.inactiveIDs)
+	b.inactiveIDs = append(b.inactiveIDs, idx)
+}
+
+func (b *Balancer) removeActiveIndexLocked(idx int) {
+	pos, ok := b.activePos[idx]
+	if !ok || pos < 0 || pos >= len(b.activeIDs) {
+		return
+	}
+	lastPos := len(b.activeIDs) - 1
+	lastIdx := b.activeIDs[lastPos]
+	b.activeIDs[pos] = lastIdx
+	b.activeIDs = b.activeIDs[:lastPos]
+	delete(b.activePos, idx)
+	if pos < len(b.activeIDs) {
+		b.activePos[lastIdx] = pos
+	}
+}
+
+func (b *Balancer) removeInactiveIndexLocked(idx int) {
+	pos, ok := b.inactivePos[idx]
+	if !ok || pos < 0 || pos >= len(b.inactiveIDs) {
+		return
+	}
+	lastPos := len(b.inactiveIDs) - 1
+	lastIdx := b.inactiveIDs[lastPos]
+	b.inactiveIDs[pos] = lastIdx
+	b.inactiveIDs = b.inactiveIDs[:lastPos]
+	delete(b.inactivePos, idx)
+	if pos < len(b.inactiveIDs) {
+		b.inactivePos[lastIdx] = pos
+	}
 }
 
 func (b *Balancer) statsForKey(serverKey string) *connectionStats {
