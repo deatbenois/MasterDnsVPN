@@ -138,20 +138,18 @@ func (c *Client) nextSessionInitAttempt() (Connection, []byte, [4]byte, error) {
 		c.sessionInitCursor = 0
 	}
 
-	snap := c.balancer.snapshot.Load()
-	if snap == nil || len(snap.active) == 0 {
+	active := c.balancer.ActiveConnections()
+	if len(active) == 0 {
 		return Connection{}, nil, empty, ErrNoValidConnections
 	}
 
-	// Use the cursor to rotate between valid resolvers in a Round-Robin fashion
-	validLen := len(snap.active)
+	// Use the cursor to rotate between valid resolvers in a Round-Robin fashion.
+	validLen := len(active)
 	start := c.sessionInitCursor
-	for checked := range validLen {
+	for checked := 0; checked < validLen; checked++ {
 		idxInValid := (start + checked) % validLen
-		connIdx := snap.active[idxInValid]
-
-		conn, ok := derefConnection(snap.connections, connIdx)
-		if !ok {
+		conn := active[idxInValid]
+		if !conn.IsValid || conn.Key == "" {
 			continue
 		}
 

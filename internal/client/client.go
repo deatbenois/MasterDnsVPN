@@ -37,7 +37,6 @@ type Client struct {
 	log      *logger.Logger
 	codec    *security.Codec
 	balancer *Balancer
-	runtime  *ResolverRuntime
 
 	successMTUChecks    bool
 	udpBufferPool       sync.Pool
@@ -179,6 +178,25 @@ type writerTask struct {
 	frames    []encodedOutboundDatagram
 }
 
+type resolverSampleKey struct {
+	resolverAddr string
+	localAddr    string
+	dnsID        uint16
+}
+
+type resolverSample struct {
+	serverKey  string
+	sentAt     time.Time
+	timedOut   bool
+	timedOutAt time.Time
+	evictAfter time.Time
+}
+
+type resolverTimeoutObservation struct {
+	serverKey string
+	at        time.Time
+}
+
 // Bootstrap initializes a new Client by loading configuration, setting up logging,
 // and preparing the connection map.
 func Bootstrap(configPath string, logPath string, overrides config.ClientConfigOverrides) (*Client, error) {
@@ -281,7 +299,6 @@ func New(cfg config.ClientConfig, log *logger.Logger, codec *security.Codec) *Cl
 	}
 
 	c.balancer.SetStreamFailoverConfig(c.streamResolverFailoverResendThreshold, c.streamResolverFailoverCooldown)
-	c.runtime = NewResolverRuntime(c.balancer, cfg.RecheckBatchSize, c.streamResolverFailoverResendThreshold, c.streamResolverFailoverCooldown)
 	c.pingManager = newPingManager(c)
 	return c
 }
