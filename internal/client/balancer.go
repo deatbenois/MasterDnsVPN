@@ -231,6 +231,10 @@ func (b *Balancer) GetConnectionByKey(key string) (Connection, bool) {
 }
 
 func (b *Balancer) SetConnectionValidity(key string, valid bool) bool {
+	return b.SetConnectionValidityWithLog(key, valid, true)
+}
+
+func (b *Balancer) SetConnectionValidityWithLog(key string, valid bool, logReactivated bool) bool {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
@@ -252,7 +256,7 @@ func (b *Balancer) SetConnectionValidity(key string, valid bool) bool {
 	}
 	b.moveConnectionStateLocked(idx, valid)
 
-	if b.log != nil && valid {
+	if b.log != nil && valid && logReactivated {
 		conn := &b.connections[idx]
 		b.log.Infof("<green>\U0001F504 DNS Resolver Reactivated: <cyan>%s</cyan> <cyan>%s</cyan>) | <cyan>%s</cyan> | Total Active: <cyan>%d</cyan></green>",
 			conn.ResolverLabel, conn.Domain, conn.Resolver, len(b.activeIDs))

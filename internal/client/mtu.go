@@ -487,7 +487,7 @@ func (c *Client) reactivateResolverConnection(conn Connection) bool {
 		return false
 	}
 
-	if !c.balancer.SetConnectionValidity(conn.Key, true) {
+	if !c.balancer.SetConnectionValidityWithLog(conn.Key, true, false) {
 		return false
 	}
 	c.balancer.SeedConservativeStats(conn.Key)
