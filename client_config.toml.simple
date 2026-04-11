@@ -112,7 +112,10 @@ LOCAL_DNS_CACHE_FLUSH_INTERVAL_SECONDS = 60.0
 # 2 = Round Robin
 # 3 = Least Loss
 # 4 = Lowest Latency
-# Modes 3 and 4 use runtime feedback from sends/successes.
+# 5 = Hybrid Score (loss-first + latency-aware)
+# 6 = Loss Then Latency (loss shortlist, then latency, then rotate among near-top)
+# 7 = Least Loss Top Random (random choice inside the best 10% loss tier)
+# Modes 3, 4, 5, 6, and 7 use runtime feedback from sends/successes.
 RESOLVER_BALANCING_STRATEGY = 2
 
 # Duplicate each normal outgoing tunnel packet this many times.
