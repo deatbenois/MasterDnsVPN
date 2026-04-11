@@ -1910,6 +1910,10 @@ func (a *ARQ) maybeSendDataNacks(sn uint16) {
 		return
 	}
 
+	a.mu.Lock()
+	a.pruneDataNackStateLocked(rcvNxt)
+	a.mu.Unlock()
+
 	windowSpan := uint16(a.dataNackMaxGap)
 	a.mu.RLock()
 	missingSeqs := make([]uint16, 0, a.dataNackMaxGap)
@@ -1991,6 +1995,23 @@ func (a *ARQ) noteDataNackSent(sn uint16, now time.Time) {
 	a.mu.Unlock()
 }
 
+func seqBehind(base uint16, candidate uint16) bool {
+	return candidate != base && uint16(base-candidate) < 32768
+}
+
+func (a *ARQ) pruneDataNackStateLocked(rcvNxt uint16) {
+	for sn := range a.firstDataNackSeen {
+		if seqBehind(rcvNxt, sn) {
+			delete(a.firstDataNackSeen, sn)
+		}
+	}
+	for sn := range a.lastDataNackSent {
+		if seqBehind(rcvNxt, sn) {
+			delete(a.lastDataNackSent, sn)
+		}
+	}
+}
+
 func (a *ARQ) clearSentDataNack(sn uint16) {
 	a.mu.Lock()
 	delete(a.firstDataNackSeen, sn)
@@ -2032,6 +2053,7 @@ func (a *ARQ) runGapRecoveryWatchdog(now time.Time) {
 	a.mu.RLock()
 	closed := a.closed
 	lastActivity := a.lastActivity
+	rcvNxt := a.rcvNxt
 	missingSeqs := a.gapRecoveryCandidatesLocked()
 	a.mu.RUnlock()
 
@@ -2042,6 +2064,10 @@ func (a *ARQ) runGapRecoveryWatchdog(now time.Time) {
 	if now.Sub(lastActivity) < a.dataNackRepeatInterval {
 		return
 	}
+
+	a.mu.Lock()
+	a.pruneDataNackStateLocked(rcvNxt)
+	a.mu.Unlock()
 
 	for _, missing := range missingSeqs {
 		if !a.shouldSendDataNack(missing, now) {
