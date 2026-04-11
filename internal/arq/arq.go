@@ -609,8 +609,8 @@ func (a *ARQ) signalFlushReady() {
 
 // IsReset checks whether stream is explicitly in reset path
 func (a *ARQ) IsReset() bool {
-	a.mu.Lock()
-	defer a.mu.Unlock()
+	a.mu.RLock()
+	defer a.mu.RUnlock()
 	return a.state == StateReset || a.rstReceived || a.rstSent
 }
 
