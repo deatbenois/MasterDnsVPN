@@ -510,7 +510,7 @@ func (s *Server) clearDeferredInflightForStreamLocked(sessionID uint8, streamID 
 }
 
 func (s *Server) removeDeferredInflightIndexLocked(sessionID uint8, streamID uint16, key uint64) {
-	if s == nil || sessionID == 0 || streamID == 0 || s.deferredInflightIndex == nil {
+	if s == nil || sessionID == 0 || s.deferredInflightIndex == nil {
 		return
 	}
 	sessionMap, exists := s.deferredInflightIndex[sessionID]

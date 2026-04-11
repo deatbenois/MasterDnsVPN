@@ -1,4 +1,4 @@
-//go:build windows
+//go:build !linux && !android && !darwin && !freebsd && !netbsd && !openbsd && !dragonfly
 
 package udpserver
 
