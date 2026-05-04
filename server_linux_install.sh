@@ -1,4 +1,4 @@
-#!/usr/bin/env bash
+﻿#!/usr/bin/env bash
 
 set -euo pipefail
 IFS=$'\n\t'
@@ -70,12 +70,14 @@ Examples:
   bash <(curl -Ls https://raw.githubusercontent.com/masterking32/MasterDnsVPN/main/server_linux_install.sh)
 
   # Install a specific release version:
-  bash <(curl -Ls https://raw.githubusercontent.com/masterking32/MasterDnsVPN/main/server_linux_install.sh) --version v1.2.3
+  bash <(curl -Ls https://raw.githubusercontent.com/masterking32/MasterDnsVPN/main/server_linux_install.sh) --version v2026.04.12.234117-978faee
 
   # Uninstall MasterDnsVPN:
   bash <(curl -Ls https://raw.githubusercontent.com/masterking32/MasterDnsVPN/main/server_linux_install.sh) --uninstall
 USAGE
-}select_release_artifact() {
+}
+
+select_release_artifact() {
   local arch="$1"
   local version="${2:-}"
   local legacy=0
@@ -721,7 +723,7 @@ if ./"$EXECUTABLE" $EXECUTABLE_ARGS > "$TMP_LOG" 2>&1; then
   KEY_GENERATED=true
 fi
 
-# Try running normally to trigger key generation (older versions)
+# Try running normally to trigger key generation (older versions < commit 86d1d9d)
 if [[ "$KEY_GENERATED" != true ]]; then
   ./"$EXECUTABLE" > "$TMP_LOG" 2>&1 &
   APP_PID=$!
@@ -735,7 +737,7 @@ if [[ "$KEY_GENERATED" != true ]]; then
   done
   kill "$APP_PID" 2>/dev/null || true
   wait "$APP_PID" 2>/dev/null || true
-  
+
   if [[ "$READY" == true ]]; then
     log_success "Key generated."
     EXECUTABLE_ARGS=""
