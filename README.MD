@@ -103,6 +103,25 @@ This list is only a high-level summary. The related sections below explain each 
 
 ---
 
+## 🌐 Battle-Tested During a Total Internet Blackout
+
+MasterDnsVPN isn't just a theoretical project. It is battle-tested and proven to work in environments where the global internet is completely severed.
+
+Recently, during a 70+ day internet blackout in Iran, authorities didn't just block VPNs or filter websites—they completely pulled the plug on international bandwidth. With 99% of the connection to the outside world physically cut off, users were trapped inside a closed, local intranet. 
+
+Standard circumvention tools are useless when there is no international internet to connect to. Yet, during this massive shutdown, MasterDnsVPN stood out as one of the very few lifelines that actually kept users connected to the global web.
+
+**How did it survive a total shutdown?**
+Instead of acting like a standard VPN, MasterDnsVPN relies on smart DNS tunneling techniques to pierce through the blackout:
+* **Multiple Resolvers:** It routes traffic through various DNS resolvers, ensuring the connection never relies on a single, easily blockable path.
+* **Encryption & Data Splitting:** It encrypts your data and breaks it down into tiny, scattered pieces.
+* **Disguised as Legitimate Traffic:** It wraps these data pieces inside standard, perfectly normal DNS queries.
+* **Bypassing Local Traps:** Because the traffic looks exactly like basic, everyday DNS requests, firewalls allow it through. The data gets resolved and reaches the outside world—even if the network forces you to use their own restricted, government-controlled local resolvers.
+
+This exact combination is what allowed MasterDnsVPN to maintain a stable connection when the outside world was completely blocked.
+
+---
+
 # Setup and Getting Started 🧑‍💻
 
 ## Section 1: 🖥️ Server Setup
