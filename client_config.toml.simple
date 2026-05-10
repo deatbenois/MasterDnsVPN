@@ -188,6 +188,15 @@ MIN_DOWNLOAD_MTU = 200
 MAX_UPLOAD_MTU = 150
 MAX_DOWNLOAD_MTU = 4000
 
+# If true, the client dynamically identifies and drops "bottleneck" resolvers
+# during the initial MTU testing phase.
+# This prevents a small number of weak servers from dragging down the global
+# Synced MTU (Upload/Download) for the entire network. The underlying algorithm 
+# is highly intelligent: it strictly protects network redundancy, balances 
+# upload vs. download gains, and only removes servers if the overall network 
+# sees a meaningful performance boost. Highly recommended to keep true.
+AUTO_REMOVE_LOW_MTU_SERVERS = true
+
 # MTU probe retries and timeout.
 # Parallelism is auto-raised internally when resolver count is large, but you
 # can still override it in advanced setups if needed.
