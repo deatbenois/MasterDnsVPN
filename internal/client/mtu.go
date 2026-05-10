@@ -300,10 +300,10 @@ func (c *Client) optimizeMTUResolvers(connections []Connection) ([]Connection, i
 		if c.log != nil {
 			reason := "Outlier"
 			if worthItUp && conn.UploadMTUBytes < finalTargetUp {
-				reason += fmt.Sprintf(" | UP: %d < Target: %d", conn.UploadMTUBytes, finalTargetUp)
+				reason += fmt.Sprintf(" | UP: %d | Target: %d", conn.UploadMTUBytes, finalTargetUp)
 			}
 			if worthItDown && conn.DownloadMTUBytes < finalTargetDown {
-				reason += fmt.Sprintf(" | DOWN: %d < Target: %d", conn.DownloadMTUBytes, finalTargetDown)
+				reason += fmt.Sprintf(" | DOWN: %d | Target: %d", conn.DownloadMTUBytes, finalTargetDown)
 			}
 			c.log.Warnf("✂️ Optimizer dropped %s: %s", conn.ResolverLabel, reason)
 		}
