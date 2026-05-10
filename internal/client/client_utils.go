@@ -582,7 +582,16 @@ func (c *Client) PrintBanner() {
 		strategyName = "Least Loss"
 	case 4:
 		strategyName = "Lowest Latency"
+	case 5:
+		strategyName = "Hybrid Score"
+	case 6:
+		strategyName = "Loss Then Latency"
+	case 7:
+		strategyName = "Least Loss Top Random"
+	case 8:
+		strategyName = "Least Loss Top Round Robin"
 	}
+
 	c.log.Infof("⚖  <cyan>Resolver Balancing, Strategy:</cyan> <yellow>%s (%d)</yellow>", strategyName, c.cfg.ResolverBalancingStrategy)
 
 	domainList := ""
