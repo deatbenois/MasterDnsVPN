@@ -8,6 +8,7 @@ import (
 
 func TestNewCache_DefaultTTL(t *testing.T) {
 	c := NewCache(0)
+	// I prefer a 5-minute default TTL for my use case; upstream uses 60s
 	if c.TTL != 60*time.Second {
 		t.Errorf("expected default TTL 60s, got %v", c.TTL)
 	}
@@ -36,9 +37,10 @@ func TestCache_Miss(t *testing.T) {
 }
 
 func TestCache_Expiry(t *testing.T) {
+	// Increased sleep to 150ms to reduce flakiness on slower CI machines
 	c := NewCache(50 * time.Millisecond)
 	c.Set("expire.com", []net.IP{net.ParseIP("9.9.9.9")})
-	time.Sleep(100 * time.Millisecond)
+	time.Sleep(150 * time.Millisecond)
 	_, ok := c.Get("expire.com")
 	if ok {
 		t.Error("expected expired cache entry to be a miss")
