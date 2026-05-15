@@ -62,3 +62,15 @@ func TestConfig_Validate_BadBufferSize(t *testing.T) {
 		t.Errorf("expected ErrInvalidBufferSize, got %v", err)
 	}
 }
+
+// TestConfig_Validate_NegativeBufferSize checks that a negative buffer size
+// is also treated as invalid, not just zero.
+func TestConfig_Validate_NegativeBufferSize(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.LocalAddr = "127.0.0.1:9000"
+	cfg.RemoteAddr = "127.0.0.1:9001"
+	cfg.BufferSize = -1
+	if err := cfg.Validate(); err != ErrInvalidBufferSize {
+		t.Errorf("expected ErrInvalidBufferSize for negative size, got %v", err)
+	}
+}
