@@ -41,7 +41,8 @@ func TestServer_ListenAndServe_Cancellation(t *testing.T) {
 	}()
 
 	// Give the server a moment to start.
-	time.Sleep(50 * time.Millisecond)
+	// Increased from 50ms to 100ms to reduce flakiness on slow CI machines.
+	time.Sleep(100 * time.Millisecond)
 	cancel()
 
 	select {
