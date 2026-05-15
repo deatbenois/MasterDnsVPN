@@ -11,6 +11,8 @@ This system is designed around compatibility with many resolver behaviors and ha
 <a href="https://trendshift.io/repositories/23688" target="_blank"><img src="https://trendshift.io/api/badge/repositories/23688" alt="masterking32%2FMasterDnsVPN | Trendshift" style="width: 250px; height: 55px;" width="250" height="55"/></a>
 
 > **Personal fork note:** I'm using this project primarily for learning purposes and to experiment with DNS tunneling under restrictive network conditions. My setup uses AES encryption with a single resolver. Notes and findings are tracked in my personal wiki.
+>
+> **Setup reminder (for myself):** When testing locally, I use `8.8.8.8` as the upstream resolver and set the TTL to `60s` to avoid stale cache issues during rapid iteration. The default TTL in the upstream config felt too high for debugging sessions.
 
 ### 📊 MasterDnsVPN Compared with Similar Projects
 
@@ -28,7 +30,4 @@ This system is designed around compatibility with many resolver behaviors and ha
 | Setup complexity | Medium | Simple | Easier installation<br>More complex only if you heavily customize advanced settings |
 | SOCKS5 support | Yes | Yes | Optimized for SOCKS5 / SOCKS4 with reduced SOCKS overhead |
 | Shadowsocks support | ✅ | ❌ | Indirectly: TCP Forwarding mode can carry TCP-based protocols<br>e.g. Shadowsocks, VLESS/VMess, etc. |
-| Real multipath | Yes (QUIC multipath) | ❌ | Yes (multi-resolver + duplication) |
-| Adaptive routing | Limited | ❌ | Advanced (latency/loss based) |
-| Design goal | High speed and efficiency | Simplicity and stability | Surviving the harshest networks — stability, speed, and efficiency |
-| Implementation language | Rust | Go | Main ve
+| Real multipath | Yes (QUIC multipath) | ❌ | Yes (multi-resolver + duplica
