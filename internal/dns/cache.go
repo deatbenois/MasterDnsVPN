@@ -20,9 +20,10 @@ type Cache struct {
 }
 
 // NewCache creates a Cache with the given TTL for entries.
+// Note: increased default TTL to 5 minutes to reduce upstream DNS lookups.
 func NewCache(ttl time.Duration) *Cache {
 	if ttl <= 0 {
-		ttl = 60 * time.Second
+		ttl = 5 * time.Minute
 	}
 	return &Cache{
 		entries: make(map[string]cacheEntry),
