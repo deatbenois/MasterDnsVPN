@@ -60,6 +60,9 @@ func (t *Tunnel) handle(local net.Conn) {
 	}
 	defer remote.Close()
 
+	// Log each successfully proxied connection for easier debugging.
+	log.Printf("tunnel: proxying %s -> %s", local.RemoteAddr(), t.cfg.RemoteAddr)
+
 	var wg sync.WaitGroup
 	copy := func(dst, src net.Conn) {
 		defer wg.Done()
