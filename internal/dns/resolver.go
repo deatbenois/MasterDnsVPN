@@ -1,6 +1,7 @@
 package dns
 
 import (
+	"context"
 	"fmt"
 	"net"
 	"time"
@@ -27,15 +28,14 @@ func NewResolver(upstream string, timeout time.Duration) *Resolver {
 func (r *Resolver) Resolve(hostname string) ([]net.IP, error) {
 	resolver := &net.Resolver{
 		PreferGo: true,
-		Dial: func(ctx interface{ Deadline() (time.Time, bool) }, network, address string) (net.Conn, error) {
+		Dial: func(ctx context.Context, network, address string) (net.Conn, error) {
 			d := net.Dialer{Timeout: r.Timeout}
-			return d.DialContext(nil, "udp", r.Upstream)
+			return d.DialContext(ctx, "udp", r.Upstream)
 		},
 	}
-	_ = resolver
 
-	// Use standard library lookup with a dialer-based resolver
-	addrs, err := net.LookupHost(hostname)
+	// Use the custom resolver so lookups actually go through r.Upstream
+	addrs, err := resolver.LookupHost(context.Background(), hostname)
 	if err != nil {
 		return nil, fmt.Errorf("dns resolve %q via %s: %w", hostname, r.Upstream, err)
 	}
