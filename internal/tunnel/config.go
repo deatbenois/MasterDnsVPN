@@ -21,6 +21,7 @@ type Config struct {
 	// DialTimeout is the timeout for establishing a connection to the remote.
 	DialTimeout time.Duration
 	// BufferSize is the size in bytes of the copy buffer.
+	// Larger values can improve throughput at the cost of memory usage.
 	BufferSize int
 }
 
@@ -28,8 +29,8 @@ type Config struct {
 func DefaultConfig() Config {
 	return Config{
 		Protocol:    ProtocolTCP,
-		DialTimeout: 10 * time.Second,
-		BufferSize:  32 * 1024,
+		DialTimeout: 30 * time.Second, // increased from 10s; remote hosts can be slow to respond
+		BufferSize:  64 * 1024,        // increased from 32KB for better throughput
 	}
 }
 
