@@ -12,9 +12,9 @@ const (
 	ProtocolSOCKS5 Protocol = "socks5"
 	ProtocolHTTP   Protocol = "http"
 
-	DefaultDialTimeout  = 10 * time.Second
-	DefaultReadTimeout  = 30 * time.Second
-	DefaultWriteTimeout = 30 * time.Second
+	DefaultDialTimeout  = 15 * time.Second
+	DefaultReadTimeout  = 60 * time.Second
+	DefaultWriteTimeout = 60 * time.Second
 )
 
 // Config holds the configuration for a proxy server.
@@ -49,6 +49,12 @@ func (c Config) Validate() error {
 	}
 	if c.DialTimeout <= 0 {
 		return errors.New("proxy: dial timeout must be positive")
+	}
+	if c.ReadTimeout <= 0 {
+		return errors.New("proxy: read timeout must be positive")
+	}
+	if c.WriteTimeout <= 0 {
+		return errors.New("proxy: write timeout must be positive")
 	}
 	return nil
 }
