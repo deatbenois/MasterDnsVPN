@@ -13,6 +13,8 @@ This system is designed around compatibility with many resolver behaviors and ha
 > **Personal fork note:** I'm using this project primarily for learning purposes and to experiment with DNS tunneling under restrictive network conditions. My setup uses AES encryption with a single resolver. Notes and findings are tracked in my personal wiki.
 >
 > **Setup reminder (for myself):** When testing locally, I use `8.8.8.8` as the upstream resolver and set the TTL to `60s` to avoid stale cache issues during rapid iteration. The default TTL in the upstream config felt too high for debugging sessions.
+>
+> **Additional note (2025-06):** Switched from `8.8.8.8` to `1.1.1.1` as the upstream resolver during local tests — latency felt slightly more consistent in my environment. Also bumped TTL down to `30s` for even faster cache invalidation when iterating on packet fragmentation behavior.
 
 ### 📊 MasterDnsVPN Compared with Similar Projects
 
@@ -28,6 +30,4 @@ This system is designed around compatibility with many resolver behaviors and ha
 | Multi-resolver support | Yes (multipath) | ❌ | Yes — advanced (multi-resolver + duplication) |
 | Resilience under heavy censorship | Good | Medium | Very strong (a core project goal) |
 | Setup complexity | Medium | Simple | Easier installation<br>More complex only if you heavily customize advanced settings |
-| SOCKS5 support | Yes | Yes | Optimized for SOCKS5 / SOCKS4 with reduced SOCKS overhead |
-| Shadowsocks support | ✅ | ❌ | Indirectly: TCP Forwarding mode can carry TCP-based protocols<br>e.g. Shadowsocks, VLESS/VMess, etc. |
-| Real multipath | Yes (QUIC multipath) | ❌ | Yes (multi-resolver + duplica
+| SOCKS5 support | Yes | Yes | Optimized for SO
